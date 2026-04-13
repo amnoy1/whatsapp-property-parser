@@ -1,0 +1,14 @@
+{
+  "name": "whatsapp-property-parser",
+  "version": "1.0.0",
+  "description": "Parse WhatsApp group messages and extract real estate listings to Airtable",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.55.0",
+    "airtable": "^0.12.2",
+    "dotenv": "^16.4.7"
+  }
+}

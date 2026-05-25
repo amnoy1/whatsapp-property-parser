@@ -44,6 +44,7 @@ function fmtPrice(val) {
  * @returns {Promise<Buffer>}
  */
 async function generateExcel(properties) {
+  if (!Array.isArray(properties)) throw new TypeError('properties must be an array');
   const wb    = new ExcelJS.Workbook();
   wb.creator  = 'Mango Realty';
   wb.created  = new Date();
@@ -104,7 +105,7 @@ async function generateExcel(properties) {
 
   // Freeze header + auto-filter
   ws.views = [{ state: 'frozen', xSplit: 0, ySplit: 1, rightToLeft: true }];
-  ws.autoFilter = { from: 'A1', to: `L${properties.length + 1}` };
+  ws.autoFilter = { from: { row: 1, column: 1 }, to: { row: properties.length + 1, column: COLUMNS.length } };
 
   return wb.xlsx.writeBuffer();
 }

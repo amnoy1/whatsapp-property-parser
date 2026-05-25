@@ -19,7 +19,11 @@ function load() {
 function save(properties) {
   const dir = path.dirname(DATA_FILE);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(DATA_FILE, JSON.stringify(properties, null, 2), 'utf8');
+  try {
+    fs.writeFileSync(DATA_FILE, JSON.stringify(properties, null, 2), 'utf8');
+  } catch (err) {
+    throw new Error(`Failed to save property database: ${err.message}`);
+  }
 }
 
 function normalizeAddress(addr) {

@@ -33,9 +33,9 @@ test('mergeProperty adds new property', () => {
 
 test('mergeProperty skips duplicate — same address, same price', () => {
   const { properties: initial } = mergeProperty([], makeProperty());
-  const { action } = mergeProperty(initial, makeProperty());
+  const { properties: after, action } = mergeProperty(initial, makeProperty());
   assert.equal(action, 'skipped');
-  assert.equal(initial.length, 1);
+  assert.equal(after.length, 1);
 });
 
 test('mergeProperty updates when price drops', () => {

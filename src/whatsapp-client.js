@@ -1,15 +1,41 @@
 'use strict';
 
 const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
+const fs   = require('fs');
+const path = require('path');
 
 const CONNECT_TIMEOUT_MS = 90_000;
+
+function _findChrome() {
+  const candidates = [
+    'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+    'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+    path.join(process.env.LOCALAPPDATA || '', 'Google\\Chrome\\Application\\chrome.exe'),
+    path.join(process.env.USERPROFILE  || '', '.cache\\puppeteer\\chrome\\win64-146.0.7680.31\\chrome-win64\\chrome.exe'),
+  ];
+  const found = candidates.find(p => fs.existsSync(p));
+  if (!found) throw new Error('Chrome not found — install Chrome or set executablePath manually');
+  return found;
+}
 
 function _createClient() {
   return new Client({
     authStrategy: new LocalAuth({ dataPath: '.wwebjs_auth' }),
+    webVersionCache: {
+      type: 'remote',
+      remotePath:
+        'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.2412.54.html',
+    },
     puppeteer: {
       headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+      executablePath: _findChrome(),
+      protocolTimeout: 300_000,   // 5 minutes — getChats() can be slow on first load
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-features=BackForwardCache',
+      ],
     },
   });
 }
@@ -27,7 +53,11 @@ async function connect() {
       CONNECT_TIMEOUT_MS
     );
 
-    client.on('ready', () => { clearTimeout(timer); resolve(); });
+    client.on('ready', () => {
+      clearTimeout(timer);
+      // Wait 5s for WhatsApp to finish loading chats before we query them
+      setTimeout(resolve, 5_000);
+    });
     client.on('auth_failure', msg => {
       clearTimeout(timer);
       reject(new Error(`WhatsApp auth failure: ${msg}`));

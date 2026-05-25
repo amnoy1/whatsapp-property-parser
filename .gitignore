@@ -2,3 +2,6 @@ node_modules/
 .env
 input/*.txt
 input/*.zip
+.wwebjs_auth/
+data/
+.superpowers/

@@ -28,7 +28,12 @@ function save(properties) {
 
 function normalizeAddress(addr) {
   if (!addr) return '';
-  return addr.trim().replace(/\s+/g, ' ');
+  return addr
+    .trim()
+    .replace(/\s+/g, ' ')
+    // Remove street prefixes: רחוב, רח', רח, שד', שדרות, שדרות, דרך, סמטת, סמטה, פינת
+    .replace(/^(רחוב|רח'|רח|שדרות|שד'|שד|דרך|סמטת|סמטה|פינת|פינה)\s+/i, '')
+    .toLowerCase();
 }
 
 /**
@@ -57,6 +62,7 @@ function mergeProperty(properties, newProp) {
       price:         newProp.price          ?? null,
       mamad:         newProp.mamad          || false,
       parking:       newProp.parking        ?? 0,
+      storage:       newProp.storage        || false,
       elevator:      newProp.elevator       || false,
       broker_name:   newProp.broker_name    || null,
       broker_phone:  newProp.broker_phone   || null,
@@ -89,6 +95,43 @@ function mergeProperty(properties, newProp) {
 }
 
 /**
+ * Deduplicate an existing list by normalized address.
+ * Keeps the record with the earliest first_seen_date and the lowest price.
+ * Call this once after load() to clean up historical duplicates.
+ */
+function deduplicateStore(properties) {
+  const seen = new Map(); // normalizedAddr → index in result
+
+  const result = [];
+  for (const prop of properties) {
+    const key = normalizeAddress(prop.address);
+    if (!key) {
+      result.push(prop);
+      continue;
+    }
+    const existingIdx = seen.get(key);
+    if (existingIdx === undefined) {
+      seen.set(key, result.length);
+      result.push(prop);
+    } else {
+      // Merge: keep earliest first_seen, latest last_seen, lowest price
+      const existing = result[existingIdx];
+      result[existingIdx] = {
+        ...existing,
+        first_seen_date: existing.first_seen_date < prop.first_seen_date
+          ? existing.first_seen_date : prop.first_seen_date,
+        last_seen_date: existing.last_seen_date > prop.last_seen_date
+          ? existing.last_seen_date : prop.last_seen_date,
+        price: (existing.price != null && prop.price != null)
+          ? Math.min(existing.price, prop.price)
+          : (existing.price ?? prop.price),
+      };
+    }
+  }
+  return result;
+}
+
+/**
  * Remove properties not seen for more than `days` days.
  */
 function removeExpired(properties, days = EXPIRY_DAYS) {
@@ -105,4 +148,4 @@ function resetPreviousPrices(properties) {
   return properties.map(p => ({ ...p, previous_price: null }));
 }
 
-module.exports = { load, save, mergeProperty, removeExpired, resetPreviousPrices };
+module.exports = { load, save, mergeProperty, deduplicateStore, removeExpired, resetPreviousPrices };

@@ -2,9 +2,10 @@
 
 require('dotenv').config();
 
+const fs = require('fs');
+const path = require('path');
 const { connect, fetchGroupMessages, sendReport, disconnect } = require('./whatsapp-client');
 const { extractProperties }       = require('./property-extractor');
-const { groupConsecutiveMessages } = require('./whatsapp-parser');
 const { generateExcel }           = require('./excel-generator');
 const store = require('./property-store');
 
@@ -37,16 +38,23 @@ async function main() {
   }
 
   // Date helpers
-  const today     = new Date().toISOString().split('T')[0];
+  const now       = new Date();
+  const today     = now.toISOString().split('T')[0];
   const [y, m, d] = today.split('-');
+  const hh        = String(now.getHours()).padStart(2, '0');
+  const mm        = String(now.getMinutes()).padStart(2, '0');
   const dateFmt   = `${d}/${m}/${y}`;
-  const filename  = `נכסים_${d}-${m}-${y}.xlsx`;
+  const filename  = `נכסים_${d}-${m}-${y}_${hh}${mm}.xlsx`;
 
   console.log(`\n🏠 WhatsApp Property Report — ${dateFmt}`);
   console.log('─'.repeat(50));
 
-  // 1. Load store + remove expired
+  // 1. Load store + deduplicate + remove expired
   let properties = store.load();
+  const beforeDedup = properties.length;
+  properties = store.deduplicateStore(properties);
+  const dupsRemoved = beforeDedup - properties.length;
+  if (dupsRemoved > 0) console.log(`   🔄 Removed ${dupsRemoved} duplicate address entries`);
   const before   = properties.length;
   properties     = store.removeExpired(properties, 10);
   const expired  = before - properties.length;
@@ -58,12 +66,16 @@ async function main() {
   const client = await connect();
   console.log('   ✅ Connected');
 
-  // 3. Fetch messages from all groups
-  console.log('\n[2/4] Fetching last 24h from groups...');
+  // 3. Fetch messages from all groups (window: yesterday 08:00 → today 08:00)
+  const windowStart = new Date(now);
+  windowStart.setHours(8, 0, 0, 0);
+  const sinceMs = windowStart.getTime() - 24 * 3_600_000; // yesterday 08:00
+
+  console.log(`\n[2/4] Fetching messages since ${new Date(sinceMs).toLocaleString('he-IL')}...`);
   const allMessages = [];
   for (const group of groups) {
     try {
-      const msgs = await fetchGroupMessages(client, group, 24);
+      const msgs = await fetchGroupMessages(client, group, sinceMs);
       console.log(`   ${group}: ${msgs.length} messages`);
       allMessages.push(...msgs);
     } catch (err) {
@@ -72,11 +84,11 @@ async function main() {
   }
   console.log(`   Total: ${allMessages.length} messages`);
 
-  // 4. Extract properties with Claude
+  // 4. Extract properties with Claude — each live message = its own block
   console.log('\n[3/4] Extracting properties...');
-  const blocks    = groupConsecutiveMessages(allMessages);
+  const blocks    = allMessages.map(m => ({ sender: m.sender, date: m.date, text: m.text }));
   const extracted = await extractProperties(blocks);
-  console.log(`   ${extracted.length} listings extracted from ${blocks.length} message blocks`);
+  console.log(`   ${extracted.length} listings extracted from ${blocks.length} messages`);
 
   // 5. Merge into store
   const stats = { added: 0, updated: 0, skipped: 0 };
@@ -95,13 +107,25 @@ async function main() {
   const excelBuffer   = await generateExcel(properties);
   const updatedCount  = properties.filter(p => p.previous_price != null).length;
 
+  // Save locally as backup
+  const reportsDir = path.join(__dirname, '..', 'reports');
+  if (!fs.existsSync(reportsDir)) fs.mkdirSync(reportsDir, { recursive: true });
+  const localPath = path.join(reportsDir, filename);
+  fs.writeFileSync(localPath, excelBuffer);
+  console.log(`   💾 Saved locally: reports/${filename}`);
+
   // 8. Send WhatsApp message
   const caption =
     `🏠 דו"ח נכסים יומי | ${dateFmt}\n` +
     `${properties.length} נכסים במאגר | ${stats.added} חדשים היום | ${updatedCount} עודכן מחיר`;
 
-  await sendReport(client, process.env.WHATSAPP_RECIPIENT_PHONE, caption, excelBuffer, filename);
-  console.log(`   ✅ Sent to ${process.env.WHATSAPP_RECIPIENT_PHONE}`);
+  try {
+    await sendReport(client, process.env.WHATSAPP_RECIPIENT_PHONE, caption, excelBuffer, filename);
+    console.log(`   ✅ Sent to ${process.env.WHATSAPP_RECIPIENT_PHONE}`);
+  } catch (err) {
+    console.error(`   ⚠️  WhatsApp send failed: ${err.message}`);
+    console.log(`   📁 File available locally: ${localPath}`);
+  }
 
   // 9. Reset price flags + save
   store.save(store.resetPreviousPrices(properties));

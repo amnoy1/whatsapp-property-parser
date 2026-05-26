@@ -14,8 +14,8 @@ $logFile    = Join-Path $logDir "daily-report.log"
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 
 $action = New-ScheduledTaskAction `
-  -Execute    $nodePath `
-  -Argument   "`"$scriptPath`"" `
+  -Execute    "cmd.exe" `
+  -Argument   "/c node `"$scriptPath`" >> `"$logFile`" 2>&1" `
   -WorkingDirectory $projectDir
 
 $trigger = New-ScheduledTaskTrigger -Daily -At "08:00"

@@ -6,60 +6,64 @@ const client = new Anthropic();
 const MODEL  = 'claude-haiku-4-5';
 
 const SYSTEM_PROMPT = `אתה מומחה בחילוץ מידע על נכסי נדל"ן מהודעות WhatsApp שנשלחות על ידי מתווכים ישראלים.
-המשימה: לנתח הודעות ולהחזיר JSON מובנה עם פרטי הנכס.
+המשימה: לנתח הודעה ולהחזיר JSON מערך עם כל הנכסים שמוזכרים בה.
 החזר תמיד JSON תקין בלבד, ללא טקסט נוסף.`;
 
 async function extractProperty(block) {
   const userPrompt = `שם השולח: ${block.sender}
 תאריך: ${block.date}
-הודעות:
+הודעה:
 ${block.text}
 
-חלץ את פרטי הנכס מהטקסט לעיל והחזר JSON בדיוק בפורמט הבא:
-{
-  "is_property_listing": true/false,
-  "property_type": "דירה" / "פנטהאוז" / "דירת גן" / "דופלקס" / "וילה" / "קוטג'" / "חנות" / "משרד" / "מחסן" / null,
-  "address": "כתובת מלאה או חלקית או null",
-  "city": "שם עיר או null",
-  "area_sqm": מספר שלם או null,
-  "balcony_sqm": מספר שלם של שטח מרפסת או גינה (מ"ר) או null,
-  "rooms": מספר (כולל חצאים כגון 3.5) או null,
-  "floor": מספר או null,
-  "price": מספר שלם ללא פסיקים (למשל 2500000) או null,
-  "mamad": true/false,
-  "parking": 0 או 1 או 2 (מספר חניות — 0 אם אין),
-  "elevator": true/false,
-  "broker_name": "שם המתווך",
-  "broker_phone": "מספר טלפון ספרות בלבד" או null
-}
+חלץ את כל הנכסים מהטקסט לעיל. יכולים להיות נכס אחד או יותר באותה הודעה.
+החזר JSON מערך בדיוק בפורמט הבא (גם אם יש נכס אחד בלבד):
+[
+  {
+    "property_type": "דירה" / "פנטהאוז" / "דירת גן" / "דופלקס" / "וילה" / "קוטג'" / "חנות" / "משרד" / "מחסן" / null,
+    "address": "כתובת מלאה או חלקית או null",
+    "city": "שם עיר או null",
+    "area_sqm": מספר שלם או null,
+    "balcony_sqm": מספר שלם של שטח מרפסת או גינה (מ"ר) או null,
+    "rooms": מספר (כולל חצאים כגון 3.5) או null,
+    "floor": מספר או null,
+    "price": מספר שלם ללא פסיקים (למשל 2500000) או null,
+    "mamad": true/false,
+    "parking": 0 או 1 או 2 (מספר חניות — 0 אם אין),
+    "storage": true/false,
+    "elevator": true/false,
+    "broker_name": "שם המתווך",
+    "broker_phone": "מספר טלפון ספרות בלבד" או null
+  }
+]
 
 חוקים:
-- is_property_listing = false אם ההודעה אינה על נכס למכירה/השכרה (שאלה, שיחה, מודעה לחיפוש וכו')
+- החזר מערך ריק [] אם ההודעה אינה על נכסים למכירה/השכרה (שאלה, שיחה, חיפוש וכו')
 - broker_name = שם השולח אם לא מופיע שם אחר
 - price: "2.5 מיליון" → 2500000, "1.8M" → 1800000, "1,800,000" → 1800000
 - rooms: "4 חד'" → 4, "3.5 חד'" → 3.5
 - mamad: true רק אם מופיע מפורשות ממ"ד / מרחב מוגן
 - parking: ספור חניות מפורשות. 0 אם לא הוזכרו.
+- storage: true רק אם מוזכר מפורשות מחסן
 - elevator: true רק אם מוזכר מפורשות מעלית
 - החזר null עבור שדות שלא נמצאו`;
 
   try {
     const response = await client.messages.create({
       model:      MODEL,
-      max_tokens: 512,
+      max_tokens: 2048,
       system:     SYSTEM_PROMPT,
       messages:   [{ role: 'user', content: userPrompt }],
     });
 
-    const text     = response.content[0]?.text?.trim();
-    if (!text) return null;
+    const text = response.content[0]?.text?.trim();
+    if (!text) return [];
 
     const jsonText = text.replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '');
-    const data     = JSON.parse(jsonText);
+    const arr      = JSON.parse(jsonText);
 
-    if (!data.is_property_listing) return null;
+    if (!Array.isArray(arr) || arr.length === 0) return [];
 
-    return {
+    return arr.map(data => ({
       property_type: data.property_type  || null,
       address:       data.address        || null,
       city:          data.city           || null,
@@ -70,28 +74,31 @@ ${block.text}
       price:         toNumber(data.price),
       mamad:         Boolean(data.mamad),
       parking:       toParking(data.parking),
+      storage:       Boolean(data.storage),
       elevator:      Boolean(data.elevator),
       broker_name:   data.broker_name    || block.sender,
       broker_phone:  cleanPhone(data.broker_phone),
       publish_date:  block.date,
-    };
+    }));
   } catch (err) {
     if (process.env.DEBUG) {
       console.error(`  [extractor] Error on block from ${block.sender}:`, err.message);
     }
-    return null;
+    return [];
   }
 }
 
 async function extractProperties(blocks) {
-  const results    = [];
+  const results     = [];
   const CONCURRENCY = 5;
 
   for (let i = 0; i < blocks.length; i += CONCURRENCY) {
     const batch   = blocks.slice(i, i + CONCURRENCY);
     const settled = await Promise.allSettled(batch.map(extractProperty));
     for (const r of settled) {
-      if (r.status === 'fulfilled' && r.value) results.push(r.value);
+      if (r.status === 'fulfilled' && Array.isArray(r.value)) {
+        results.push(...r.value);
+      }
     }
     if (i + CONCURRENCY < blocks.length) await sleep(500);
   }

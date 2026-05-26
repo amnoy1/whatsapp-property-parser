@@ -3,18 +3,21 @@
 const ExcelJS = require('exceljs');
 
 const COLUMNS = [
-  { key: 'property_type',  header: 'סוג נכס',             width: 14 },
-  { key: 'address',        header: 'כתובת מלאה',           width: 30 },
-  { key: 'area_sqm',       header: 'שטח (מ"ר)',            width: 10 },
-  { key: 'balcony_sqm',    header: 'מרפסת/גינה (מ"ר)',    width: 16 },
-  { key: 'rooms',          header: 'חדרים',                width: 8  },
-  { key: 'floor',          header: 'קומה',                 width: 8  },
-  { key: 'price',          header: 'מחיר',                 width: 15 },
-  { key: 'price_updated',  header: 'עודכן',                width: 15 },
-  { key: 'mamad',          header: 'ממ"ד',                 width: 7  },
-  { key: 'parking',        header: 'חניה',                 width: 7  },
-  { key: 'elevator',       header: 'מעלית',                width: 8  },
-  { key: 'time_on_market', header: 'זמן בשוק (חודשים)',   width: 18 },
+  { key: 'property_type',  header: 'סוג נכס',               width: 14 },
+  { key: 'address',        header: 'כתובת מלאה',             width: 30 },
+  { key: 'area_sqm',       header: 'שטח (מ"ר)',              width: 10 },
+  { key: 'balcony_sqm',    header: 'מרפסת/גינה/גג (מ"ר)',   width: 18 },
+  { key: 'rooms',          header: 'חדרים',                  width: 8  },
+  { key: 'floor',          header: 'קומה',                   width: 8  },
+  { key: 'price',          header: 'מחיר',                   width: 15 },
+  { key: 'price_updated',  header: 'עודכן',                  width: 15 },
+  { key: 'mamad',          header: 'ממ"ד',                   width: 7  },
+  { key: 'parking',        header: 'חניה',                   width: 7  },
+  { key: 'storage',        header: 'מחסן',                   width: 8  },
+  { key: 'elevator',       header: 'מעלית',                  width: 8  },
+  { key: 'time_on_market', header: 'זמן בשוק (חודשים)',     width: 18 },
+  { key: 'broker_name',    header: 'מתווך',                  width: 20 },
+  { key: 'broker_phone',   header: 'טלפון מתווך',            width: 16 },
 ];
 
 const HEADER_FILL = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1B5E20' } };
@@ -80,8 +83,11 @@ async function generateExcel(properties) {
       price_updated:  isPriceUpdated ? fmtPrice(prop.price) : '',
       mamad:          fmtBool(prop.mamad),
       parking:        prop.parking       ?? 0,
+      storage:        fmtBool(prop.storage),
       elevator:       fmtBool(prop.elevator),
       time_on_market: monthsOnMarket(prop.first_seen_date),
+      broker_name:    prop.broker_name   || '',
+      broker_phone:   prop.broker_phone  || '',
     });
 
     row.eachCell(cell => {
@@ -95,11 +101,16 @@ async function generateExcel(properties) {
     }
 
     // Colour ✓/— cells
-    ['mamad', 'elevator'].forEach(key => {
+    ['mamad', 'storage', 'elevator'].forEach(key => {
       const cell = row.getCell(key);
       cell.font = cell.value === '✓'
         ? { color: { argb: 'FF2E7D32' }, bold: true, name: 'Arial' }
         : { color: { argb: 'FF9E9E9E' }, name: 'Arial' };
+    });
+
+    // Left-align broker columns
+    ['broker_name', 'broker_phone'].forEach(key => {
+      row.getCell(key).alignment = { horizontal: 'right', vertical: 'middle' };
     });
   }
 

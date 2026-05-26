@@ -76,13 +76,13 @@ async function connect() {
  * @param {number} hoursBack
  * @returns {Promise<Array<{sender:string, date:string, time:string, text:string}>>}
  */
-async function fetchGroupMessages(client, groupName, hoursBack = 24) {
+async function fetchGroupMessages(client, groupName, sinceMs) {
   const chats = await client.getChats();
   const chat  = chats.find(c => c.name === groupName);
   if (!chat) throw new Error(`WhatsApp group not found: "${groupName}"`);
 
   const messages  = await chat.fetchMessages({ limit: 500 });
-  const cutoffMs  = Date.now() - hoursBack * 3_600_000;
+  const cutoffMs  = sinceMs ?? (Date.now() - 24 * 3_600_000);
 
   return messages
     .filter(m => m.timestamp * 1000 >= cutoffMs && m.body && !m.fromMe)
@@ -111,6 +111,14 @@ async function sendReport(client, recipientPhone, messageText, excelBuffer, file
     ? digits + '@c.us'
     : '972' + digits.slice(1) + '@c.us';
 
+  // Verify the target chat exists before sending
+  const chat = await client.getChatById(waId).catch(() => null);
+  if (!chat) {
+    throw new Error(`Cannot find WhatsApp chat for ${recipientPhone} (${waId}). ` +
+      `Make sure you have an existing conversation with this number, or send a message first.`);
+  }
+  console.log(`   📲 Sending to: "${chat.name || waId}" (${waId})`);
+
   const media = new MessageMedia(
     'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
     excelBuffer.toString('base64'),
@@ -118,6 +126,9 @@ async function sendReport(client, recipientPhone, messageText, excelBuffer, file
   );
 
   await client.sendMessage(waId, media, { caption: messageText });
+
+  // Brief pause to allow WhatsApp to finish the upload before disconnecting
+  await new Promise(r => setTimeout(r, 3_000));
 }
 
 /**

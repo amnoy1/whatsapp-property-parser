@@ -4,7 +4,7 @@ const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
 const fs   = require('fs');
 const path = require('path');
 
-const CONNECT_TIMEOUT_MS = 90_000;
+const CONNECT_TIMEOUT_MS = 180_000; // 3 minutes
 
 function _findChrome() {
   const candidates = [

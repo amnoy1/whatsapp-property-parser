@@ -4,15 +4,17 @@ require('dotenv').config();
 
 const fs = require('fs');
 const path = require('path');
-const { connect, fetchGroupMessages, sendReport, disconnect } = require('./whatsapp-client');
+const { connect, fetchGroupMessages, disconnect } = require('./whatsapp-client');
 const { extractProperties }       = require('./property-extractor');
 const { generateExcel }           = require('./excel-generator');
+const { generateHtml }            = require('./html-generator');
+const { upsertProperties, uploadToStorage } = require('./supabase-uploader');
 const store = require('./property-store');
 
 // ── config ────────────────────────────────────────────────────────────────────
 
 function validateEnv() {
-  const required = ['ANTHROPIC_API_KEY', 'WHATSAPP_RECIPIENT_PHONE'];
+  const required = ['ANTHROPIC_API_KEY', 'SUPABASE_URL', 'SUPABASE_SERVICE_KEY'];
   const missing  = required.filter(k => !process.env[k]);
   if (missing.length) {
     console.error(`\n❌ Missing env vars: ${missing.join(', ')}`);
@@ -102,29 +104,47 @@ async function main() {
   // 6. Persist store
   store.save(properties);
 
-  // 7. Generate Excel
-  console.log('\n[4/4] Generating report & sending...');
-  const excelBuffer   = await generateExcel(properties);
-  const updatedCount  = properties.filter(p => p.previous_price != null).length;
+  // 7. Generate Excel + HTML and upload to Supabase
+  console.log('\n[4/4] Generating report & uploading to Supabase...');
+  const excelBuffer  = await generateExcel(properties);
+  const updatedCount = properties.filter(p => p.previous_price != null).length;
 
-  // Save locally as backup
+  // Save Excel locally as backup
   const reportsDir = path.join(__dirname, '..', 'reports');
   if (!fs.existsSync(reportsDir)) fs.mkdirSync(reportsDir, { recursive: true });
   const localPath = path.join(reportsDir, filename);
   fs.writeFileSync(localPath, excelBuffer);
   console.log(`   💾 Saved locally: reports/${filename}`);
 
-  // 8. Send WhatsApp message
-  const caption =
-    `🏠 דו"ח נכסים יומי | ${dateFmt}\n` +
-    `${properties.length} נכסים במאגר | ${stats.added} חדשים היום | ${updatedCount} עודכן מחיר`;
-
+  // Upload Excel to Supabase Storage → get public URL for HTML download button
+  let excelPublicUrl = '';
   try {
-    await sendReport(client, process.env.WHATSAPP_RECIPIENT_PHONE, caption, excelBuffer, filename);
-    console.log(`   ✅ Sent to ${process.env.WHATSAPP_RECIPIENT_PHONE}`);
+    excelPublicUrl = await uploadToStorage(
+      excelBuffer,
+      'latest.xlsx',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    );
+    console.log(`   📤 Excel → Supabase Storage`);
   } catch (err) {
-    console.error(`   ⚠️  WhatsApp send failed: ${err.message}`);
-    console.log(`   📁 File available locally: ${localPath}`);
+    console.error(`   ⚠️  Excel upload failed: ${err.message}`);
+  }
+
+  // Generate HTML report and upload to Storage
+  try {
+    const htmlContent = generateHtml(properties, excelPublicUrl, dateFmt);
+    const htmlBuffer  = Buffer.from(htmlContent, 'utf8');
+    const htmlUrl     = await uploadToStorage(htmlBuffer, 'latest.html', 'text/html; charset=utf-8');
+    console.log(`   🌐 HTML  → ${htmlUrl}`);
+  } catch (err) {
+    console.error(`   ⚠️  HTML upload failed: ${err.message}`);
+  }
+
+  // Upsert all properties to Supabase DB
+  try {
+    const count = await upsertProperties(properties);
+    console.log(`   ✅ Supabase DB updated — ${count} properties`);
+  } catch (err) {
+    console.error(`   ⚠️  Supabase DB upsert failed: ${err.message}`);
   }
 
   // 9. Reset price flags + save

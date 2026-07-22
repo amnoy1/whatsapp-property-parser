@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.55.0",
+    "@supabase/supabase-js": "^2.110.8",
     "airtable": "^0.12.2",
     "dotenv": "^16.4.7",
     "exceljs": "^4.4.0",

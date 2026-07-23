@@ -50,8 +50,8 @@ async function connect() {
 
     client.on('ready', () => {
       clearTimeout(timer);
-      // Wait 5s for WhatsApp to finish loading chats before we query them
-      setTimeout(resolve, 5_000);
+      // Wait 12s for WhatsApp to finish loading chats + message history before we query them
+      setTimeout(resolve, 12_000);
     });
     client.on('auth_failure', msg => {
       clearTimeout(timer);
@@ -72,24 +72,32 @@ async function connect() {
  * @returns {Promise<Array<{sender:string, date:string, time:string, text:string}>>}
  */
 async function fetchGroupMessages(client, groupName, sinceMs) {
-  const chats = await client.getChats();
-  const chat  = chats.find(c => c.name === groupName);
-  if (!chat) throw new Error(`WhatsApp group not found: "${groupName}"`);
+  const cutoffMs = sinceMs ?? (Date.now() - 24 * 3_600_000);
 
-  const messages  = await chat.fetchMessages({ limit: 500 });
-  const cutoffMs  = sinceMs ?? (Date.now() - 24 * 3_600_000);
+  // getChats() fails in current WA Web because getChatModel() throws a minified "r" error
+  // for some chat types. Instead, access the WA store directly to find the group and
+  // read its messages — bypasses getChatModel entirely.
+  const result = await client.pupPage.evaluate(async (name, cutoff) => {
+    const allChats = window.require('WAWebCollections').Chat.getModelsArray();
+    const chat = allChats.find(c => c.name === name);
+    if (!chat) return { error: 'not_found' };
 
-  return messages
-    .filter(m => m.timestamp * 1000 >= cutoffMs && m.body && !m.fromMe)
-    .map(m => {
-      const ts = new Date(m.timestamp * 1000);
-      return {
-        sender: m._data?.notifyName || m.author || 'Unknown',
-        date:   ts.toISOString().split('T')[0],
-        time:   ts.toTimeString().slice(0, 5), // "HH:MM" — required by groupConsecutiveMessages
-        text:   m.body,
-      };
-    });
+    // Msgs already in memory — for active groups this covers the last 24h window
+    const msgs = chat.msgs.getModelsArray();
+    return {
+      messages: msgs
+        .filter(m => !m.isNotification && !m.id.fromMe && m.body && m.t * 1000 >= cutoff)
+        .map(m => ({
+          sender: m.notifyName || m.senderObj?.name || 'Unknown',
+          date:   new Date(m.t * 1000).toISOString().split('T')[0],
+          time:   new Date(m.t * 1000).toTimeString().slice(0, 5),
+          text:   m.body,
+        })),
+    };
+  }, groupName, cutoffMs);
+
+  if (result.error === 'not_found') throw new Error(`WhatsApp group not found: "${groupName}"`);
+  return result.messages;
 }
 
 /**

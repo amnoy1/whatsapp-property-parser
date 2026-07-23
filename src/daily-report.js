@@ -82,6 +82,7 @@ async function main() {
       allMessages.push(...msgs);
     } catch (err) {
       console.error(`   ⚠️  ${group}: ${err.message}`);
+      if (process.env.DEBUG) console.error(err.stack || err);
     }
   }
   console.log(`   Total: ${allMessages.length} messages`);

@@ -55,6 +55,8 @@ function mergeProperty(properties, newProp) {
       id:            uuidv4(),
       property_type: newProp.property_type  || null,
       address:       newProp.address,
+      city:          newProp.city           || 'כפר סבא',
+      neighborhood:  newProp.neighborhood   || null,
       area_sqm:      newProp.area_sqm       ?? null,
       balcony_sqm:   newProp.balcony_sqm    ?? null,
       rooms:         newProp.rooms          ?? null,

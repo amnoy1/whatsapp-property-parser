@@ -23,6 +23,8 @@ async function upsertProperties(properties) {
     id:               p.id,
     property_type:    p.property_type    ?? null,
     address:          p.address,
+    city:             p.city             || 'כפר סבא',
+    neighborhood:     p.neighborhood     ?? null,
     area_sqm:         p.area_sqm         ?? null,
     balcony_sqm:      p.balcony_sqm      ?? null,
     rooms:            p.rooms            ?? null,

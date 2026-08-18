@@ -21,7 +21,8 @@ ${block.text}
   {
     "property_type": "דירה" / "פנטהאוז" / "דירת גן" / "דופלקס" / "וילה" / "קוטג'" / "חנות" / "משרד" / "מחסן" / null,
     "address": "כתובת מלאה או חלקית או null",
-    "city": "שם עיר או null",
+    "city": "שם עיר — אם לא מוזכרת עיר ספציפית, החזר \"כפר סבא\"",
+    "neighborhood": "שם שכונה אם מוזכר, אחרת null",
     "area_sqm": מספר שלם או null,
     "balcony_sqm": מספר שלם של שטח מרפסת או גינה (מ"ר) או null,
     "rooms": מספר (כולל חצאים כגון 3.5) או null,
@@ -45,7 +46,9 @@ ${block.text}
 - parking: ספור חניות מפורשות. 0 אם לא הוזכרו.
 - storage: true רק אם מוזכר מפורשות מחסן
 - elevator: true רק אם מוזכר מפורשות מעלית
-- החזר null עבור שדות שלא נמצאו`;
+- city: ברירת מחדל היא "כפר סבא" — רק אם מוזכרת עיר אחרת (רעננה, הוד השרון, אלפי מנשה וכד') — החזר אותה במקום
+- neighborhood: החזר null אם לא מוזכרת שכונה
+- החזר null עבור שדות אחרים שלא נמצאו`;
 
   try {
     const response = await client.messages.create({
@@ -66,7 +69,8 @@ ${block.text}
     return arr.map(data => ({
       property_type: data.property_type  || null,
       address:       data.address        || null,
-      city:          data.city           || null,
+      city:          data.city           || 'כפר סבא',
+      neighborhood:  data.neighborhood   || null,
       area_sqm:      toNumber(data.area_sqm),
       balcony_sqm:   toNumber(data.balcony_sqm),
       rooms:         toNumber(data.rooms),

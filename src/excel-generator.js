@@ -4,6 +4,8 @@ const ExcelJS = require('exceljs');
 
 const COLUMNS = [
   { key: 'property_type',  header: 'סוג נכס',               width: 14 },
+  { key: 'city',           header: 'עיר',                    width: 14 },
+  { key: 'neighborhood',   header: 'שכונה',                  width: 16 },
   { key: 'address',        header: 'כתובת מלאה',             width: 30 },
   { key: 'area_sqm',       header: 'שטח (מ"ר)',              width: 10 },
   { key: 'balcony_sqm',    header: 'מרפסת/גינה/גג (מ"ר)',   width: 18 },
@@ -74,6 +76,8 @@ async function generateExcel(properties) {
 
     const row = ws.addRow({
       property_type:  prop.property_type || '',
+      city:           prop.city          || 'כפר סבא',
+      neighborhood:   prop.neighborhood  || '',
       address:        prop.address       || '',
       area_sqm:       prop.area_sqm      ?? '',
       balcony_sqm:    prop.balcony_sqm   ?? '',

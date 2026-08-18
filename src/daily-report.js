@@ -9,7 +9,57 @@ const { extractProperties }       = require('./property-extractor');
 const { generateExcel }           = require('./excel-generator');
 const { generateHtml }            = require('./html-generator');
 const { upsertProperties, uploadToStorage } = require('./supabase-uploader');
+const { enrichNeighborhoods }               = require('./geocoder');
 const store = require('./property-store');
+
+// ── lock file (prevents double-runs) ─────────────────────────────────────────
+
+const LOCK_FILE       = path.join(__dirname, '..', 'data', 'running.lock');
+const LOCK_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
+
+function isRunning() {
+  if (!fs.existsSync(LOCK_FILE)) return false;
+  try {
+    const ageMs = Date.now() - fs.statSync(LOCK_FILE).mtimeMs;
+    if (ageMs > LOCK_TIMEOUT_MS) {
+      console.log('⚠️  Stale lock file (>30 min) — removing');
+      fs.unlinkSync(LOCK_FILE);
+      return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function acquireLock() {
+  const dir = path.dirname(LOCK_FILE);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(LOCK_FILE, new Date().toISOString());
+}
+
+function releaseLock() {
+  try { fs.unlinkSync(LOCK_FILE); } catch {}
+}
+
+// ── last-fetch checkpoint ─────────────────────────────────────────────────────
+
+const LAST_FETCH_FILE = path.join(__dirname, '..', 'data', 'last-fetch.json');
+
+function getLastFetchMs() {
+  try {
+    const data = JSON.parse(fs.readFileSync(LAST_FETCH_FILE, 'utf8'));
+    return typeof data.fetchedUpTo === 'number' ? data.fetchedUpTo : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveLastFetchMs(ms) {
+  const dir = path.dirname(LAST_FETCH_FILE);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(LAST_FETCH_FILE, JSON.stringify({ fetchedUpTo: ms }));
+}
 
 // ── config ────────────────────────────────────────────────────────────────────
 
@@ -32,6 +82,13 @@ const GROUPS = () => [
 
 async function main() {
   validateEnv();
+
+  // Prevent double-runs (Task Scheduler + manual trigger can overlap)
+  if (isRunning()) {
+    console.log('⚠️  Already running (lock file exists) — exiting.');
+    process.exit(0);
+  }
+  acquireLock();
 
   const groups = GROUPS();
   if (!groups.length) {
@@ -68,10 +125,20 @@ async function main() {
   const client = await connect();
   console.log('   ✅ Connected');
 
-  // 3. Fetch messages from all groups (window: yesterday 08:00 → today 08:00)
-  const windowStart = new Date(now);
-  windowStart.setHours(8, 0, 0, 0);
-  const sinceMs = windowStart.getTime() - 24 * 3_600_000; // yesterday 08:00
+  // 3. Fetch messages — window ends at today 08:00, starts at last successful checkpoint
+  //    (or yesterday 08:00 if no checkpoint). This catches up missed days after crashes.
+  const windowEnd = new Date(now);
+  windowEnd.setHours(8, 0, 0, 0);
+  const windowEndMs    = windowEnd.getTime();
+  const defaultSinceMs = windowEndMs - 24 * 3_600_000; // yesterday 08:00
+
+  const lastFetchMs = getLastFetchMs();
+  const sinceMs     = (lastFetchMs && lastFetchMs < defaultSinceMs) ? lastFetchMs : defaultSinceMs;
+
+  if (sinceMs < defaultSinceMs) {
+    const missedDays = Math.round((defaultSinceMs - sinceMs) / 86_400_000);
+    console.log(`   📅 Catching up ${missedDays} missed day(s)`);
+  }
 
   console.log(`\n[2/4] Fetching messages since ${new Date(sinceMs).toLocaleString('he-IL')}...`);
   const allMessages = [];
@@ -87,11 +154,20 @@ async function main() {
   }
   console.log(`   Total: ${allMessages.length} messages`);
 
+  // Checkpoint: record that we've successfully fetched up to windowEndMs
+  saveLastFetchMs(windowEndMs);
+
   // 4. Extract properties with Claude — each live message = its own block
   console.log('\n[3/4] Extracting properties...');
   const blocks    = allMessages.map(m => ({ sender: m.sender, date: m.date, text: m.text }));
   const extracted = await extractProperties(blocks);
   console.log(`   ${extracted.length} listings extracted from ${blocks.length} messages`);
+
+  // 4b. Enrich missing neighborhoods via Google Geocoding
+  if (process.env.GOOGLE_GEOCODING_KEY && extracted.length > 0) {
+    const found = await enrichNeighborhoods(extracted);
+    console.log(`   🗺️  Neighborhoods geocoded: ${found}/${extracted.filter(p => !p.neighborhood).length + found} resolved`);
+  }
 
   // 5. Merge into store
   const stats = { added: 0, updated: 0, skipped: 0 };
@@ -154,10 +230,12 @@ async function main() {
   // 10. Disconnect
   await disconnect(client);
 
+  releaseLock();
   console.log('\n✅ Done!\n');
 }
 
 main().catch(err => {
+  releaseLock();
   console.error('\n❌ Fatal error:', err.message);
   if (process.env.DEBUG) console.error(err.stack);
   process.exit(1);

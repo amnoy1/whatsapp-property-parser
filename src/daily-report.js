@@ -10,6 +10,7 @@ const { generateExcel }           = require('./excel-generator');
 const { generateHtml }            = require('./html-generator');
 const { upsertProperties, uploadToStorage } = require('./supabase-uploader');
 const { enrichNeighborhoods }               = require('./geocoder');
+const { enrichNeighborhoodsFromDB }         = require('./neighborhood-lookup');
 const store = require('./property-store');
 
 // ── lock file (prevents double-runs) ─────────────────────────────────────────
@@ -163,7 +164,13 @@ async function main() {
   const extracted = await extractProperties(blocks);
   console.log(`   ${extracted.length} listings extracted from ${blocks.length} messages`);
 
-  // 4b. Enrich missing neighborhoods via Google Geocoding
+  // 4b. Enrich missing neighborhoods from street_neighborhoods DB table
+  if (extracted.length > 0) {
+    const dbFound = await enrichNeighborhoodsFromDB(extracted);
+    if (dbFound > 0) console.log(`   🏘️  Neighborhoods from DB: ${dbFound}/${extracted.length}`);
+  }
+
+  // 4c. Enrich remaining missing neighborhoods via Google Geocoding
   if (process.env.GOOGLE_GEOCODING_KEY && extracted.length > 0) {
     const found = await enrichNeighborhoods(extracted);
     console.log(`   🗺️  Neighborhoods geocoded: ${found}/${extracted.filter(p => !p.neighborhood).length + found} resolved`);

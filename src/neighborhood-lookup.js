@@ -128,7 +128,8 @@ function streetVariants(name) {
  * - Handles Hebrew quote normalization: ״/׳ ↔ "/′
  * - Handles "רח׳" / "משעול" / "כיכר" prefixes
  * - Handles corner streets: "X פינת Y" → tries X and Y separately
- * - Does NOT assign neighborhood to non-כפר-סבא cities
+ * - City-aware: the lookup key is `city::street`, so a city with no rows
+ *   in street_neighborhoods simply produces no match — no per-city gate needed
  *
  * @param {Array} properties  — mutated in-place
  * @returns {Promise<number>} count of properties that got a neighborhood
@@ -150,14 +151,32 @@ async function enrichNeighborhoodsFromDB(properties) {
 
   if (allVariants.length === 0) return 0;
 
+  // A single .in() query is a GET with every variant URL-encoded into the
+  // query string — past ~50-60 Hebrew street names this blows the server's
+  // 16KB header limit (HeadersOverflowError) and the whole batch silently
+  // yields 0 matches. Chunk the request instead.
+  const BATCH_SIZE = 40;
+  const batches = [];
+  for (let i = 0; i < allVariants.length; i += BATCH_SIZE) {
+    batches.push(allVariants.slice(i, i + BATCH_SIZE));
+  }
+
   try {
     const supabase = getClient();
-    const { data, error } = await supabase
-      .from('street_neighborhoods')
-      .select('city, street, neighborhood')
-      .in('street', allVariants);
+    const data = [];
+    for (const batch of batches) {
+      const { data: rows, error } = await supabase
+        .from('street_neighborhoods')
+        .select('city, street, neighborhood')
+        .in('street', batch);
 
-    if (error || !data || data.length === 0) return 0;
+      if (error) {
+        console.error('[neighborhood-lookup] Supabase query failed:', error.message);
+        continue;
+      }
+      if (rows) data.push(...rows);
+    }
+    if (data.length === 0) return 0;
 
     // Build lookup map for both variants of every stored street.
     // Also adds version without trailing apostrophe so "אהרונוביץ'" matches "אהרונוביץ".
@@ -186,8 +205,6 @@ async function enrichNeighborhoodsFromDB(properties) {
     let found = 0;
     for (const prop of needsLookup) {
       const city = prop.city || 'כפר סבא';
-      // Only look up כפר סבא — other cities have no mapping yet
-      if (city !== 'כפר סבא') continue;
 
       const candidates = candidateStreetsFromAddress(prop.address);
       let neighborhood = null;
@@ -202,7 +219,8 @@ async function enrichNeighborhoodsFromDB(properties) {
       }
     }
     return found;
-  } catch {
+  } catch (err) {
+    console.error('[neighborhood-lookup] enrichNeighborhoodsFromDB failed:', err.message);
     return 0;
   }
 }

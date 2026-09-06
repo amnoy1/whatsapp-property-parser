@@ -3,7 +3,7 @@
 require('dotenv').config();
 
 const { createClient } = require('@supabase/supabase-js');
-const { enrichNeighborhoodsFromDB } = require('./src/neighborhood-lookup');
+const { enrichAllNeighborhoods } = require('./src/neighborhood-enrichment');
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -24,10 +24,13 @@ async function main() {
   console.log(`   Found ${props.length} properties without neighborhood`);
   if (props.length === 0) return;
 
-  // Run the DB lookup (mutates neighborhood in-place)
-  const found = await enrichNeighborhoodsFromDB(props);
-  console.log(`   🏘️  Matched ${found} neighborhoods from street table`);
-  if (found === 0) return;
+  // Curated table lookup, then Google Geocoding fallback with self-heal
+  // into street_neighborhoods for cities with no curated coverage yet.
+  const { dbFound, geocoded, healed } = await enrichAllNeighborhoods(props);
+  console.log(`   🏘️  Matched ${dbFound} neighborhoods from street table`);
+  if (geocoded > 0) console.log(`   🗺️  Matched ${geocoded} more via Google Geocoding`);
+  if (healed > 0) console.log(`   💾 Self-healed ${healed} mapping(s) into street_neighborhoods`);
+  if (dbFound === 0 && geocoded === 0) return;
 
   // Update matched properties back to Supabase
   const toUpdate = props.filter(p => p.neighborhood);

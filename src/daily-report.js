@@ -9,8 +9,7 @@ const { extractProperties }       = require('./property-extractor');
 const { generateExcel }           = require('./excel-generator');
 const { generateHtml }            = require('./html-generator');
 const { upsertProperties, uploadToStorage } = require('./supabase-uploader');
-const { enrichNeighborhoods }               = require('./geocoder');
-const { enrichNeighborhoodsFromDB }         = require('./neighborhood-lookup');
+const { enrichAllNeighborhoods }            = require('./neighborhood-enrichment');
 const store = require('./property-store');
 
 // ── lock file (prevents double-runs) ─────────────────────────────────────────
@@ -164,16 +163,16 @@ async function main() {
   const extracted = await extractProperties(blocks);
   console.log(`   ${extracted.length} listings extracted from ${blocks.length} messages`);
 
-  // 4b. Enrich missing neighborhoods from street_neighborhoods DB table
+  // 4b. Enrich missing neighborhoods: curated street_neighborhoods table
+  // first, then Google Geocoding as fallback. A geocoded result self-heals
+  // into street_neighborhoods for cities with no curated coverage yet
+  // (see src/neighborhood-enrichment.js) — cities Amir curates manually are
+  // never touched.
   if (extracted.length > 0) {
-    const dbFound = await enrichNeighborhoodsFromDB(extracted);
+    const { dbFound, geocoded, healed } = await enrichAllNeighborhoods(extracted);
     if (dbFound > 0) console.log(`   🏘️  Neighborhoods from DB: ${dbFound}/${extracted.length}`);
-  }
-
-  // 4c. Enrich remaining missing neighborhoods via Google Geocoding
-  if (process.env.GOOGLE_GEOCODING_KEY && extracted.length > 0) {
-    const found = await enrichNeighborhoods(extracted);
-    console.log(`   🗺️  Neighborhoods geocoded: ${found}/${extracted.filter(p => !p.neighborhood).length + found} resolved`);
+    if (geocoded > 0) console.log(`   🗺️  Neighborhoods geocoded: ${geocoded}`);
+    if (healed > 0) console.log(`   💾 Self-healed ${healed} mapping(s) into street_neighborhoods`);
   }
 
   // 5. Merge into store

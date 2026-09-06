@@ -225,4 +225,45 @@ async function enrichNeighborhoodsFromDB(properties) {
   }
 }
 
-module.exports = { enrichNeighborhoodsFromDB };
+/**
+ * Return the set of cities that already have at least one curated row in
+ * street_neighborhoods — used to decide which cities are manually maintained
+ * (never auto-written to) vs. eligible for geocoding self-heal.
+ * @returns {Promise<Set<string>>}
+ */
+async function getCitiesWithCoverage() {
+  try {
+    const supabase = getClient();
+    const { data, error } = await supabase.from('street_neighborhoods').select('city');
+    if (error) {
+      console.error('[neighborhood-lookup] getCitiesWithCoverage failed:', error.message);
+      return new Set();
+    }
+    return new Set((data || []).map(row => row.city));
+  } catch (err) {
+    console.error('[neighborhood-lookup] getCitiesWithCoverage failed:', err.message);
+    return new Set();
+  }
+}
+
+/**
+ * Upsert one curated street→neighborhood mapping (city+street is the unique key).
+ */
+async function saveStreetNeighborhood(city, street, neighborhood) {
+  try {
+    const supabase = getClient();
+    const { error } = await supabase
+      .from('street_neighborhoods')
+      .upsert({ city, street, neighborhood }, { onConflict: 'city,street' });
+    if (error) console.error('[neighborhood-lookup] saveStreetNeighborhood failed:', error.message);
+  } catch (err) {
+    console.error('[neighborhood-lookup] saveStreetNeighborhood failed:', err.message);
+  }
+}
+
+module.exports = {
+  enrichNeighborhoodsFromDB,
+  extractStreetName,
+  getCitiesWithCoverage,
+  saveStreetNeighborhood,
+};

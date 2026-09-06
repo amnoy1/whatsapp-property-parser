@@ -40,28 +40,42 @@ function _createClient() {
  * @returns {Promise<Client>}
  */
 async function connect() {
-  const client = _createClient();
+  const MAX_ATTEMPTS = 2;
 
-  await new Promise((resolve, reject) => {
-    const timer = setTimeout(
-      () => reject(new Error('WhatsApp connection timeout after 90s')),
-      CONNECT_TIMEOUT_MS
-    );
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    const client = _createClient();
+    try {
+      await new Promise((resolve, reject) => {
+        const timer = setTimeout(
+          () => reject(new Error(`WhatsApp connection timeout after ${CONNECT_TIMEOUT_MS / 1000}s`)),
+          CONNECT_TIMEOUT_MS
+        );
 
-    client.on('ready', () => {
-      clearTimeout(timer);
-      // Wait 12s for WhatsApp to finish loading chats + message history before we query them
-      setTimeout(resolve, 12_000);
-    });
-    client.on('auth_failure', msg => {
-      clearTimeout(timer);
-      reject(new Error(`WhatsApp auth failure: ${msg}`));
-    });
+        client.on('ready', () => {
+          clearTimeout(timer);
+          // Wait 12s for WhatsApp to finish loading chats + message history before we query them
+          setTimeout(resolve, 12_000);
+        });
+        client.on('auth_failure', msg => {
+          clearTimeout(timer);
+          reject(new Error(`WhatsApp auth failure: ${msg}`));
+        });
 
-    client.initialize();
-  });
+        client.initialize();
+      });
+      return client;
+    } catch (err) {
+      if (err.message.startsWith('WhatsApp auth failure')) throw err; // QR needed — no point retrying
+      try { await client.destroy(); } catch {}
 
-  return client;
+      if (attempt < MAX_ATTEMPTS) {
+        console.log(`   ⚠️  Attempt ${attempt} failed: ${err.message.slice(0, 80)}. Retrying in 20s...`);
+        await new Promise(r => setTimeout(r, 20_000));
+      } else {
+        throw err;
+      }
+    }
+  }
 }
 
 /**
@@ -82,7 +96,19 @@ async function fetchGroupMessages(client, groupName, sinceMs) {
     const chat = allChats.find(c => c.name === name);
     if (!chat) return { error: 'not_found' };
 
-    // Msgs already in memory — for active groups this covers the last 24h window
+    // Load earlier messages from the server until the oldest loaded message
+    // is before the cutoff. WA Web only keeps ~50 msgs in memory by default;
+    // loadEarlierMsgs fetches batches from the server.
+    const loadEarlier = window.require('WAWebChatLoadMessages').loadEarlierMsgs;
+    for (let round = 0; round < 15; round++) {
+      const all = chat.msgs.getModelsArray();
+      if (!all.length) break;
+      const oldestTs = all.reduce((min, m) => Math.min(min, m.t * 1000), Infinity);
+      if (oldestTs <= cutoff) break;         // history now covers the full window
+      const loaded = await loadEarlier({ chat });
+      if (!loaded || !loaded.length) break;  // server has no more history
+    }
+
     const msgs = chat.msgs.getModelsArray();
     return {
       messages: msgs

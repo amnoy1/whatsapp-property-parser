@@ -102,9 +102,16 @@ async function fetchGroupMessages(client, groupName, sinceMs) {
     const loadEarlier = window.require('WAWebChatLoadMessages').loadEarlierMsgs;
     for (let round = 0; round < 15; round++) {
       const all = chat.msgs.getModelsArray();
-      if (!all.length) break;
-      const oldestTs = all.reduce((min, m) => Math.min(min, m.t * 1000), Infinity);
-      if (oldestTs <= cutoff) break;         // history now covers the full window
+      // An empty cache means we have NOTHING yet, not that history is
+      // already covered — must still try loadEarlier at least once.
+      // (Bug found 2026-09-07: the old `if (!all.length) break` here gave
+      // up immediately for a chat whose in-memory cache started empty,
+      // silently returning 0 messages even when real ones existed on the
+      // server — matches the observed decline to 0 messages/day.)
+      if (all.length) {
+        const oldestTs = all.reduce((min, m) => Math.min(min, m.t * 1000), Infinity);
+        if (oldestTs <= cutoff) break;        // history now covers the full window
+      }
       const loaded = await loadEarlier({ chat });
       if (!loaded || !loaded.length) break;  // server has no more history
     }

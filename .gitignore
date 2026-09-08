@@ -5,3 +5,6 @@ input/*.zip
 .wwebjs_auth/
 data/
 .superpowers/
+logs/
+reports/
+group-names.json

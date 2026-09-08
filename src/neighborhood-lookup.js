@@ -9,27 +9,34 @@ function getClient() {
   return createClient(url, key);
 }
 
+const STREET_PREFIX_RE = /^(רחוב|רח'|רח|שדרות|שד'|שד|דרך|סמטת|סמטה|פינת|פינה|משעול|כיכר|שכונת)\s+/i;
+
 /**
- * Normalize Hebrew abbreviation marks and apostrophes to standard ASCII.
- * "רמב״ם" → "רמב"ם", "רח׳" → "רח'"
+ * Normalize Hebrew abbreviation marks, apostrophes and the maqaf (a Hebrew
+ * hyphen, U+05BE, e.g. "בר־אילן") to standard ASCII / plain space.
+ * "רמב״ם" → "רמב"ם", "רח׳" → "רח'", "בר־אילן" → "בר אילן"
  */
 function normalizeQuotes(name) {
   if (!name) return name;
   return name
     .replace(/״/g, '"')   // gershayim (U+05F4) → "
-    .replace(/׳/g, "'");  // geresh    (U+05F3) → '
+    .replace(/׳/g, "'")   // geresh    (U+05F3) → '
+    .replace(/־/g, ' ');  // maqaf     (U+05BE) → space
 }
 
 /**
  * Extract the primary street name from a full address string.
  * Handles all common Hebrew prefixes including משעול, כיכר.
- * Normalizes Unicode apostrophes before prefix matching.
+ * Normalizes Unicode apostrophes/maqaf before prefix matching.
+ * Strips a house number wherever it appears, including when followed by
+ * descriptive text (e.g. "12 קדמת הדרים" — a floor/position qualifier).
  *
  * "רחוב שיפר 12"              → "שיפר"
  * "רח׳ ששת הימים 51"          → "ששת הימים"  (then looked up as "שדרות ששת הימים")
  * "משעול הסובלנות 7"           → "הסובלנות"
  * "רחוב אז״ר פינת תל חי"      → "אז"ר פינת תל חי"  (corner handled separately)
  * "הכלנית 28 ב'"               → "הכלנית"
+ * "השיקמה 12 קדמת הדרים"      → "השיקמה"
  */
 function extractStreetName(address) {
   if (!address) return null;
@@ -39,10 +46,11 @@ function extractStreetName(address) {
     .replace(/,.*$/, '')
     .trim()
     // Remove common Hebrew street prefixes
-    .replace(/^(רחוב|רח'|רח|שדרות|שד'|שד|דרך|סמטת|סמטה|פינת|פינה|משעול|כיכר|שכונת)\s+/i, '')
+    .replace(STREET_PREFIX_RE, '')
     .trim()
-    // Remove house number at end: "12", "12א", "12 ב'", "12/3"
-    .replace(/\s+\d+(\s*[א-ת]'?)?(\s*\/\s*\d+)?$/, '')
+    // Remove house number, and any trailing qualifier text after it:
+    // "12", "12א", "12 ב'", "12/3", "12 קדמת הדרים"
+    .replace(/\s+\d+(\s*[א-ת]'?)?(\s*\/\s*\d+)?(\s+.*)?$/, '')
     .trim();
   return street || null;
 }
@@ -53,6 +61,7 @@ function extractStreetName(address) {
  * - Regular street: "שיפר 12"         → ["שיפר"]
  * - Corner street: "X פינת Y"         → ["X פינת Y", "X", "Y"]
  * - "שכונת הפארק" (neighborhood name) → ["הפארק"]
+ * - Punctuation variants: "ביל"ו"     → also tries "בילו" (no punctuation)
  */
 function candidateStreets(address) {
   if (!address) return [];
@@ -65,7 +74,7 @@ function candidateStreets(address) {
   // so that table entries stored with their prefix (e.g. "משעול האהבה") can still match
   const beforeStrip = normalizeQuotes(address.trim())
     .replace(/,.*$/, '').trim()
-    .replace(/\s+\d+(\s*[א-ת]'?)?(\s*\/\s*\d+)?$/, '').trim();
+    .replace(/\s+\d+(\s*[א-ת]'?)?(\s*\/\s*\d+)?(\s+.*)?$/, '').trim();
   if (beforeStrip && beforeStrip !== base) candidates.add(beforeStrip);
 
   // Corner streets: "X פינת Y" → also try X alone and Y alone
@@ -87,6 +96,11 @@ function candidateStreets(address) {
   // Strip trailing apostrophe: "אהרונוביץ'" → "אהרונוביץ"
   const withoutTrailingApostrophe = base.replace(/[''׳]+$/, '');
   if (withoutTrailingApostrophe !== base) candidates.add(withoutTrailingApostrophe);
+
+  // Strip ALL internal quote/apostrophe characters, not just a trailing one:
+  // "ביל"ו" → "בילו" (matches a table entry stored with no punctuation at all)
+  const withoutAnyQuotes = base.replace(/["'׳״]/g, '');
+  if (withoutAnyQuotes !== base) candidates.add(withoutAnyQuotes);
 
   return [...candidates];
 }
@@ -120,16 +134,50 @@ function streetVariants(name) {
 }
 
 /**
+ * Given a street name as stored in street_neighborhoods, return every form an
+ * incoming address might use to refer to it: ה/non-ה, with/without its own
+ * street-type prefix (a table row stored as "סמטת אביבים" also matches an
+ * address that just says "אביבים"), and with/without internal punctuation.
+ * This is the table-side mirror of candidateStreets() above — it exists
+ * because a table entry can carry a prefix or punctuation the source address
+ * never had, so guessing only from the address side misses real matches.
+ */
+function expandStreetVariants(rawName) {
+  if (!rawName) return new Set();
+  const base = normalizeQuotes(rawName).trim();
+  const names = new Set();
+  const addAll = (n) => { for (const v of streetVariants(n)) names.add(v); };
+
+  addAll(base);
+  const stripped = base.replace(STREET_PREFIX_RE, '').trim();
+  if (stripped && stripped !== base) addAll(stripped);
+
+  for (const n of [...names]) {
+    const clean = n.replace(/[''׳]+$/, '');
+    if (clean !== n) names.add(clean);
+    const noQuotes = n.replace(/["'׳״]/g, '');
+    if (noQuotes !== n) names.add(noQuotes);
+  }
+  return names;
+}
+
+/**
  * Enrich properties that have no neighborhood by looking up the street name
  * in the street_neighborhoods Supabase table.
  *
  * Rules:
  * - Handles ה"א הידיעה: "כלנית" ↔ "הכלנית"
- * - Handles Hebrew quote normalization: ״/׳ ↔ "/′
- * - Handles "רח׳" / "משעול" / "כיכר" prefixes
+ * - Handles Hebrew quote/maqaf normalization: ״/׳/־ ↔ "/'/space
+ * - Handles "רח׳" / "משעול" / "כיכר" prefixes on either side (address or table row)
  * - Handles corner streets: "X פינת Y" → tries X and Y separately
  * - City-aware: the lookup key is `city::street`, so a city with no rows
  *   in street_neighborhoods simply produces no match — no per-city gate needed
+ *
+ * Fetches the whole table for the cities actually needed (it's a curated,
+ * hand-maintained table — a few hundred rows total) and matches in memory,
+ * rather than querying by guessed street-name variants: a table row can carry
+ * a prefix or punctuation no address candidate would ever produce, so that
+ * approach systematically missed real matches.
  *
  * @param {Array} properties  — mutated in-place
  * @returns {Promise<number>} count of properties that got a neighborhood
@@ -138,59 +186,27 @@ async function enrichNeighborhoodsFromDB(properties) {
   const needsLookup = properties.filter(p => !p.neighborhood && p.address);
   if (needsLookup.length === 0) return 0;
 
-  // Collect all unique candidate street names (including corner variants)
-  const allCandidates = [...new Set(
-    needsLookup.flatMap(p => candidateStreetsFromAddress(p.address))
-  )];
-  // Include ה variants + apostrophe-suffixed variants for each candidate
-  // (handles stored names like "אהרונוביץ'" when extracted as "אהרונוביץ")
-  const allVariants = [...new Set([
-    ...allCandidates.flatMap(streetVariants),
-    ...allCandidates.flatMap(c => [`${c}'`, `${c}׳`]),
-  ])];
-
-  if (allVariants.length === 0) return 0;
-
-  // A single .in() query is a GET with every variant URL-encoded into the
-  // query string — past ~50-60 Hebrew street names this blows the server's
-  // 16KB header limit (HeadersOverflowError) and the whole batch silently
-  // yields 0 matches. Chunk the request instead.
-  const BATCH_SIZE = 40;
-  const batches = [];
-  for (let i = 0; i < allVariants.length; i += BATCH_SIZE) {
-    batches.push(allVariants.slice(i, i + BATCH_SIZE));
-  }
+  const cities = [...new Set(needsLookup.map(p => p.city || 'כפר סבא'))];
 
   try {
     const supabase = getClient();
-    const data = [];
-    for (const batch of batches) {
-      const { data: rows, error } = await supabase
-        .from('street_neighborhoods')
-        .select('city, street, neighborhood')
-        .in('street', batch);
+    const { data, error } = await supabase
+      .from('street_neighborhoods')
+      .select('city, street, neighborhood')
+      .in('city', cities);
 
-      if (error) {
-        console.error('[neighborhood-lookup] Supabase query failed:', error.message);
-        continue;
-      }
-      if (rows) data.push(...rows);
+    if (error) {
+      console.error('[neighborhood-lookup] Supabase query failed:', error.message);
+      return 0;
     }
-    if (data.length === 0) return 0;
+    if (!data || data.length === 0) return 0;
 
-    // Build lookup map for both variants of every stored street.
-    // Also adds version without trailing apostrophe so "אהרונוביץ'" matches "אהרונוביץ".
+    // Build lookup map: every table row contributes all its name variants.
     const lookupMap = new Map();
     for (const row of data) {
-      for (const variant of streetVariants(row.street)) {
+      for (const variant of expandStreetVariants(row.street)) {
         const key = `${row.city}::${variant}`;
         if (!lookupMap.has(key)) lookupMap.set(key, row.neighborhood);
-        // also without trailing apostrophe
-        const clean = variant.replace(/[''׳]+$/, '');
-        if (clean !== variant) {
-          const cleanKey = `${row.city}::${clean}`;
-          if (!lookupMap.has(cleanKey)) lookupMap.set(cleanKey, row.neighborhood);
-        }
       }
     }
 
@@ -264,6 +280,10 @@ async function saveStreetNeighborhood(city, street, neighborhood) {
 module.exports = {
   enrichNeighborhoodsFromDB,
   extractStreetName,
+  candidateStreets,
+  candidateStreetsFromAddress,
+  streetVariants,
+  expandStreetVariants,
   getCitiesWithCoverage,
   saveStreetNeighborhood,
 };

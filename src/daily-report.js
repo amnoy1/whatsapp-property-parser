@@ -9,7 +9,7 @@ const { extractProperties }       = require('./property-extractor');
 const { generateExcel }           = require('./excel-generator');
 const { generateHtml }            = require('./html-generator');
 const { upsertProperties, uploadToStorage } = require('./supabase-uploader');
-const { enrichAllNeighborhoods }            = require('./neighborhood-enrichment');
+const { enrichAllNeighborhoods, backfillMissingNeighborhoods } = require('./neighborhood-enrichment');
 const store = require('./property-store');
 
 // ── lock file (prevents double-runs) ─────────────────────────────────────────
@@ -228,6 +228,19 @@ async function main() {
     console.log(`   ✅ Supabase DB updated — ${count} properties`);
   } catch (err) {
     console.error(`   ⚠️  Supabase DB upsert failed: ${err.message}`);
+  }
+
+  // 8b. Backfill: re-check EVERY still-null neighborhood in the DB (not just
+  // today's new listings) against the current street_neighborhoods table.
+  // Catches properties ingested before their street was curated — without
+  // this, that gap only closed by someone remembering to run the script by hand.
+  try {
+    const { fetched, dbFound, geocoded, updated } = await backfillMissingNeighborhoods();
+    if (fetched > 0) {
+      console.log(`   🔁 Backfill: ${updated}/${fetched} previously-unmatched properties resolved (${dbFound} from table, ${geocoded} geocoded)`);
+    }
+  } catch (err) {
+    console.error(`   ⚠️  Neighborhood backfill failed: ${err.message}`);
   }
 
   // 9. Reset price flags + save

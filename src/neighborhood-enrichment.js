@@ -1,5 +1,6 @@
 'use strict';
 
+const { createClient } = require('@supabase/supabase-js');
 const {
   enrichNeighborhoodsFromDB,
   extractStreetName,
@@ -63,4 +64,40 @@ async function enrichAllNeighborhoods(properties) {
   return { dbFound, geocoded, healed };
 }
 
-module.exports = { enrichAllNeighborhoods, selectHealCandidates };
+/**
+ * Re-check every already-stored property that still has no neighborhood
+ * against the current street_neighborhoods table (curated lookup + geocoding
+ * fallback, same pipeline as enrichAllNeighborhoods). Catches the case a
+ * property was ingested before its street was added to the curated table —
+ * enrichment only ever ran once, at ingestion time, so without this it would
+ * stay null forever even after the table catches up.
+ *
+ * @returns {Promise<{fetched: number, dbFound: number, geocoded: number, healed: number, updated: number}>}
+ */
+async function backfillMissingNeighborhoods() {
+  const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
+
+  const { data: props, error } = await supabase
+    .from('whatsapp_properties')
+    .select('id, address, city, neighborhood')
+    .is('neighborhood', null)
+    .not('address', 'is', null);
+
+  if (error) throw new Error(`[backfill] Fetch failed: ${error.message}`);
+  if (props.length === 0) return { fetched: 0, dbFound: 0, geocoded: 0, healed: 0, updated: 0 };
+
+  const { dbFound, geocoded, healed } = await enrichAllNeighborhoods(props);
+
+  const toUpdate = props.filter(p => p.neighborhood);
+  for (const prop of toUpdate) {
+    const { error: upErr } = await supabase
+      .from('whatsapp_properties')
+      .update({ neighborhood: prop.neighborhood })
+      .eq('id', prop.id);
+    if (upErr) console.error(`[backfill] Failed to update ${prop.id}: ${upErr.message}`);
+  }
+
+  return { fetched: props.length, dbFound, geocoded, healed, updated: toUpdate.length };
+}
+
+module.exports = { enrichAllNeighborhoods, selectHealCandidates, backfillMissingNeighborhoods };

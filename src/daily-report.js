@@ -8,7 +8,7 @@ const { connect, fetchGroupMessages, disconnect } = require('./whatsapp-client')
 const { extractProperties }       = require('./property-extractor');
 const { generateExcel }           = require('./excel-generator');
 const { generateHtml }            = require('./html-generator');
-const { upsertProperties, uploadToStorage } = require('./supabase-uploader');
+const { upsertProperties, deleteProperties, uploadToStorage } = require('./supabase-uploader');
 const { enrichAllNeighborhoods, backfillMissingNeighborhoods } = require('./neighborhood-enrichment');
 const store = require('./property-store');
 
@@ -115,9 +115,11 @@ async function main() {
   const dupsRemoved = beforeDedup - properties.length;
   if (dupsRemoved > 0) console.log(`   🔄 Removed ${dupsRemoved} duplicate address entries`);
   const before   = properties.length;
-  properties     = store.removeExpired(properties, 10);
+  const removedExpired = store.removeExpired(properties, 20);
+  properties     = removedExpired.properties;
+  const expiredIds = removedExpired.removedIds;
   const expired  = before - properties.length;
-  if (expired > 0) console.log(`   🗑  Removed ${expired} expired listings (>10 days unseen)`);
+  if (expired > 0) console.log(`   🗑  Removed ${expired} expired listings (>20 days unseen)`);
   console.log(`   📦 ${properties.length} properties in database`);
 
   // 2. Connect to WhatsApp
@@ -228,6 +230,18 @@ async function main() {
     console.log(`   ✅ Supabase DB updated — ${count} properties`);
   } catch (err) {
     console.error(`   ⚠️  Supabase DB upsert failed: ${err.message}`);
+  }
+
+  // Delete expired properties from Supabase too — otherwise the row stays
+  // forever, and if the address reappears later it gets a new id and shows
+  // up as a duplicate next to the orphaned old row.
+  if (expiredIds.length > 0) {
+    try {
+      await deleteProperties(expiredIds);
+      console.log(`   🗑️  Removed ${expiredIds.length} expired listing(s) from Supabase`);
+    } catch (err) {
+      console.error(`   ⚠️  Supabase DB delete failed: ${err.message}`);
+    }
   }
 
   // 8b. Backfill: re-check EVERY still-null neighborhood in the DB (not just

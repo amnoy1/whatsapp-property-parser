@@ -73,8 +73,9 @@ test('removeExpired removes properties not seen in N days', () => {
     { id: '2', address: 'ב', last_seen_date: today, previous_price: null },
   ];
   const result = removeExpired(props, 10);
-  assert.equal(result.length, 1);
-  assert.equal(result[0].id, '2');
+  assert.equal(result.properties.length, 1);
+  assert.equal(result.properties[0].id, '2');
+  assert.deepEqual(result.removedIds, ['1']);
 });
 
 test('resetPreviousPrices sets all previous_price to null', () => {

@@ -51,6 +51,27 @@ async function upsertProperties(properties) {
 }
 
 /**
+ * Delete rows from the `whatsapp_properties` table by id.
+ * Used for listings that expired out of the local store — without this
+ * they stay in Supabase forever, and if the same address is seen again
+ * later it gets a new id and shows up as a duplicate row.
+ * @param {Array<string>} ids
+ * @returns {Promise<number>} number of ids requested for deletion
+ */
+async function deleteProperties(ids) {
+  if (!ids || !ids.length) return 0;
+
+  const supabase = getClient();
+  const { error } = await supabase
+    .from('whatsapp_properties')
+    .delete()
+    .in('id', ids);
+
+  if (error) throw new Error(`Supabase DB delete failed: ${error.message}`);
+  return ids.length;
+}
+
+/**
  * Upload a Buffer to Supabase Storage (overwrites existing file).
  * @param {Buffer} buffer
  * @param {string} filename   e.g. 'latest.html' or 'latest.xlsx'
@@ -73,4 +94,4 @@ async function uploadToStorage(buffer, filename, contentType) {
   return data.publicUrl;
 }
 
-module.exports = { upsertProperties, uploadToStorage };
+module.exports = { upsertProperties, deleteProperties, uploadToStorage };

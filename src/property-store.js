@@ -5,7 +5,7 @@ const path = require('path');
 const { v4: uuidv4 } = require('uuid');
 
 const DATA_FILE  = path.join(__dirname, '..', 'data', 'known-properties.json');
-const EXPIRY_DAYS = 10;
+const EXPIRY_DAYS = 20;
 
 function load() {
   if (!fs.existsSync(DATA_FILE)) return [];
@@ -135,12 +135,20 @@ function deduplicateStore(properties) {
 
 /**
  * Remove properties not seen for more than `days` days.
+ * Returns the kept properties plus the ids of the removed ones, so the
+ * caller can also delete those rows from Supabase — otherwise a listing
+ * that reappears after the expiry window gets a fresh id and is inserted
+ * as a duplicate next to the orphaned old row.
  */
 function removeExpired(properties, days = EXPIRY_DAYS) {
   const cutoff = new Date();
   cutoff.setDate(cutoff.getDate() - days);
   const cutoffStr = cutoff.toISOString().split('T')[0];
-  return properties.filter(p => p.last_seen_date >= cutoffStr);
+  const kept = properties.filter(p => p.last_seen_date >= cutoffStr);
+  const removedIds = properties
+    .filter(p => p.last_seen_date < cutoffStr)
+    .map(p => p.id);
+  return { properties: kept, removedIds };
 }
 
 /**

@@ -37,6 +37,37 @@ function normalizeAddress(addr) {
 }
 
 /**
+ * Whether two records sharing the same normalized address are plausibly
+ * the same real-world listing, vs. two different properties that just
+ * happen to sit on the same street (common when the address has no house
+ * number). A same-address match alone is NOT enough — e.g. a store and an
+ * apartment on "רוטשילד", or a rental and a sale on "משעול גיל", produce
+ * huge price gaps that a naive merge silently swallows as one listing.
+ */
+function looksLikeSameProperty(existing, newProp) {
+  // Different property type (store vs. apartment, etc.) when both are known
+  if (existing.property_type && newProp.property_type &&
+      existing.property_type !== newProp.property_type) {
+    return false;
+  }
+  // Different room count when both are known — a real listing's room
+  // count doesn't change between sightings.
+  if (existing.rooms != null && newProp.rooms != null &&
+      Math.abs(existing.rooms - newProp.rooms) >= 1) {
+    return false;
+  }
+  // A price gap this large on the same street is almost never the same
+  // listing's asking price dropping — more likely a rental mixed with a
+  // sale, or two unrelated apartments (e.g. ₪8,300 vs ₪3,390,000).
+  if (existing.price != null && newProp.price != null &&
+      existing.price > 0 && newProp.price > 0) {
+    const ratio = Math.max(existing.price, newProp.price) / Math.min(existing.price, newProp.price);
+    if (ratio > 3) return false;
+  }
+  return true;
+}
+
+/**
  * Merge a newly extracted property into the existing list.
  * Returns { properties, action } where action = 'added' | 'updated' | 'skipped'
  */
@@ -47,7 +78,7 @@ function mergeProperty(properties, newProp) {
   if (!newAddr) return { properties, action: 'skipped' };
 
   const idx = properties.findIndex(
-    p => normalizeAddress(p.address) === newAddr
+    p => normalizeAddress(p.address) === newAddr && looksLikeSameProperty(p, newProp)
   );
 
   if (idx === -1) {
@@ -102,7 +133,7 @@ function mergeProperty(properties, newProp) {
  * Call this once after load() to clean up historical duplicates.
  */
 function deduplicateStore(properties) {
-  const seen = new Map(); // normalizedAddr → index in result
+  const seen = new Map(); // normalizedAddr → indices in result sharing that address
 
   const result = [];
   for (const prop of properties) {
@@ -111,14 +142,17 @@ function deduplicateStore(properties) {
       result.push(prop);
       continue;
     }
-    const existingIdx = seen.get(key);
-    if (existingIdx === undefined) {
-      seen.set(key, result.length);
+    const candidateIdxs = seen.get(key);
+    const matchIdx = candidateIdxs?.find(i => looksLikeSameProperty(result[i], prop));
+
+    if (matchIdx === undefined) {
+      if (candidateIdxs) candidateIdxs.push(result.length);
+      else seen.set(key, [result.length]);
       result.push(prop);
     } else {
       // Merge: keep earliest first_seen, latest last_seen, lowest price
-      const existing = result[existingIdx];
-      result[existingIdx] = {
+      const existing = result[matchIdx];
+      result[matchIdx] = {
         ...existing,
         first_seen_date: existing.first_seen_date < prop.first_seen_date
           ? existing.first_seen_date : prop.first_seen_date,
@@ -158,4 +192,4 @@ function resetPreviousPrices(properties) {
   return properties.map(p => ({ ...p, previous_price: null }));
 }
 
-module.exports = { load, save, mergeProperty, deduplicateStore, removeExpired, resetPreviousPrices };
+module.exports = { load, save, mergeProperty, deduplicateStore, removeExpired, resetPreviousPrices, looksLikeSameProperty };

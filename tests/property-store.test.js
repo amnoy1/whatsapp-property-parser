@@ -2,7 +2,7 @@
 
 const { test } = require('node:test');
 const assert   = require('node:assert/strict');
-const { mergeProperty, removeExpired, resetPreviousPrices } = require('../src/property-store');
+const { mergeProperty, deduplicateStore, removeExpired, resetPreviousPrices, looksLikeSameProperty } = require('../src/property-store');
 
 function makeProperty(overrides = {}) {
   return {
@@ -63,6 +63,62 @@ test('mergeProperty normalizes address whitespace for comparison', () => {
   const { properties: initial } = mergeProperty([], makeProperty({ address: '  הרצל 12, תל אביב  ' }));
   const { action } = mergeProperty(initial, makeProperty({ address: 'הרצל 12, תל אביב' }));
   assert.equal(action, 'skipped');
+});
+
+test('mergeProperty adds a new record — same street, no house number, but a different property type', () => {
+  // e.g. a store and an apartment both on "רוטשילד" with no house number
+  const { properties: initial } = mergeProperty([], makeProperty({
+    address: 'רוטשילד', property_type: 'חנות', rooms: null, price: 4700,
+  }));
+  const { properties: after, action } = mergeProperty(initial, makeProperty({
+    address: 'רוטשילד', property_type: 'פנטהאוז', rooms: 4, price: 2690000,
+  }));
+  assert.equal(action, 'added');
+  assert.equal(after.length, 2);
+});
+
+test('mergeProperty adds a new record — same street, no house number, but a wildly different price', () => {
+  // e.g. a rental (₪8,300/month) vs. a sale (₪3,390,000) on the same street
+  const { properties: initial } = mergeProperty([], makeProperty({
+    address: 'משעול גיל', rooms: 3, price: 8300,
+  }));
+  const { properties: after, action } = mergeProperty(initial, makeProperty({
+    address: 'משעול גיל', rooms: 4, price: 3390000,
+  }));
+  assert.equal(action, 'added');
+  assert.equal(after.length, 2);
+});
+
+test('mergeProperty still merges same address + same type + comparable price (real duplicate)', () => {
+  const { properties: initial } = mergeProperty([], makeProperty({
+    address: 'ויצמן 177', property_type: 'דירה', rooms: 4, price: 2490000,
+  }));
+  const { properties: after, action } = mergeProperty(initial, makeProperty({
+    address: 'ויצמן 177', property_type: 'דירה', rooms: 4, price: 2490000,
+  }));
+  assert.equal(action, 'skipped');
+  assert.equal(after.length, 1);
+});
+
+test('looksLikeSameProperty rejects a >3x price gap', () => {
+  const a = makeProperty({ price: 8300 });
+  const b = makeProperty({ price: 3390000 });
+  assert.equal(looksLikeSameProperty(a, b), false);
+});
+
+test('looksLikeSameProperty accepts a modest price drop', () => {
+  const a = makeProperty({ price: 3000000 });
+  const b = makeProperty({ price: 2800000 });
+  assert.equal(looksLikeSameProperty(a, b), true);
+});
+
+test('deduplicateStore keeps two distinct listings that share an address with no house number', () => {
+  const props = [
+    { id: '1', address: 'רוטשילד', property_type: 'חנות', rooms: null, price: 4700, first_seen_date: '2026-09-15', last_seen_date: '2026-09-15' },
+    { id: '2', address: 'רוטשילד', property_type: 'פנטהאוז', rooms: 4, price: 2690000, first_seen_date: '2026-07-27', last_seen_date: '2026-07-27' },
+  ];
+  const result = deduplicateStore(props);
+  assert.equal(result.length, 2);
 });
 
 test('removeExpired removes properties not seen in N days', () => {

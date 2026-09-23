@@ -20,16 +20,7 @@
 
 require('dotenv').config();
 const { createClient } = require('@supabase/supabase-js');
-const { looksLikeSameProperty } = require('../src/property-store');
-
-function normalizeAddress(addr) {
-  if (!addr) return '';
-  return addr
-    .trim()
-    .replace(/\s+/g, ' ')
-    .replace(/^(רחוב|רח'|רח|שדרות|שד'|שד|דרך|סמטת|סמטה|פינת|פינה)\s+/i, '')
-    .toLowerCase();
-}
+const { looksLikeSameProperty, normalizeAddress } = require('../src/property-store');
 
 async function main() {
   const dryRun = process.argv.includes('--dry-run');

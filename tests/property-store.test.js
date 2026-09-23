@@ -2,7 +2,7 @@
 
 const { test } = require('node:test');
 const assert   = require('node:assert/strict');
-const { mergeProperty, deduplicateStore, removeExpired, resetPreviousPrices, looksLikeSameProperty } = require('../src/property-store');
+const { mergeProperty, deduplicateStore, removeExpired, resetPreviousPrices, looksLikeSameProperty, normalizeAddress } = require('../src/property-store');
 
 function makeProperty(overrides = {}) {
   return {
@@ -62,6 +62,24 @@ test('mergeProperty skips property with no address', () => {
 test('mergeProperty normalizes address whitespace for comparison', () => {
   const { properties: initial } = mergeProperty([], makeProperty({ address: '  הרצל 12, תל אביב  ' }));
   const { action } = mergeProperty(initial, makeProperty({ address: 'הרצל 12, תל אביב' }));
+  assert.equal(action, 'skipped');
+});
+
+test('normalizeAddress treats Hebrew geresh and ASCII apostrophe as the same character', () => {
+  assert.equal(normalizeAddress("רח' דב הוז"), normalizeAddress('רח׳ דב הוז'));
+});
+
+test('normalizeAddress treats Hebrew gershayim and ASCII double-quote as the same character', () => {
+  assert.equal(normalizeAddress('רחוב אז"ר 118'), normalizeAddress('רחוב אז״ר 118'));
+});
+
+test('normalizeAddress ignores commas', () => {
+  assert.equal(normalizeAddress('לוונברג, הירוקה 80'), normalizeAddress('לוונברג הירוקה 80'));
+});
+
+test('mergeProperty merges the same address written with a different geresh character', () => {
+  const { properties: initial } = mergeProperty([], makeProperty({ address: 'רח׳ ארלוזורוב 25' }));
+  const { action } = mergeProperty(initial, makeProperty({ address: "ארלוזורוב 25" }));
   assert.equal(action, 'skipped');
 });
 

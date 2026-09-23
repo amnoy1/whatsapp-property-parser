@@ -30,7 +30,16 @@ function normalizeAddress(addr) {
   if (!addr) return '';
   return addr
     .trim()
+    // Hebrew geresh/gershayim (׳ ״) and ASCII apostrophe/quote (' ") are used
+    // interchangeably depending on who typed the WhatsApp message and on
+    // which keyboard/autocorrect — canonicalize before anything else, or
+    // "רח' X" and "רח׳ X" (or "אז\"ר" vs "אז״ר") silently fail to match and
+    // the same real address gets treated as two different ones.
+    .replace(/[׳']/g, "'")
+    .replace(/[״"]/g, '"')
+    .replace(/,/g, ' ')
     .replace(/\s+/g, ' ')
+    .trim()
     // Remove street prefixes: רחוב, רח', רח, שד', שדרות, שדרות, דרך, סמטת, סמטה, פינת
     .replace(/^(רחוב|רח'|רח|שדרות|שד'|שד|דרך|סמטת|סמטה|פינת|פינה)\s+/i, '')
     .toLowerCase();
@@ -202,4 +211,4 @@ function resetPreviousPrices(properties) {
   return properties.map(p => ({ ...p, previous_price: null }));
 }
 
-module.exports = { load, save, mergeProperty, deduplicateStore, removeExpired, resetPreviousPrices, looksLikeSameProperty };
+module.exports = { load, save, mergeProperty, deduplicateStore, removeExpired, resetPreviousPrices, looksLikeSameProperty, normalizeAddress };

@@ -117,7 +117,9 @@ async function main() {
   let properties = await fetchAllProperties();
   console.log(`   📥 ${properties.length} properties fetched`);
   const beforeDedup = properties.length;
-  properties = store.deduplicateStore(properties);
+  const deduped = store.deduplicateStore(properties);
+  properties = deduped.properties;
+  const dedupRemovedIds = deduped.removedIds;
   const dupsRemoved = beforeDedup - properties.length;
   if (dupsRemoved > 0) console.log(`   🔄 Removed ${dupsRemoved} duplicate address entries`);
   const before   = properties.length;
@@ -127,6 +129,7 @@ async function main() {
   const expired  = before - properties.length;
   if (expired > 0) console.log(`   🗑  Removed ${expired} expired listings (>20 days unseen)`);
   console.log(`   📦 ${properties.length} properties in database`);
+  const idsToDeleteFromSupabase = [...dedupRemovedIds, ...expiredIds];
 
   // 2. Connect to WhatsApp
   console.log('\n[2/5] Connecting to WhatsApp...');
@@ -239,13 +242,16 @@ async function main() {
     console.error(`   ⚠️  Supabase DB upsert failed: ${err.message}`);
   }
 
-  // Delete expired properties from Supabase too — otherwise the row stays
-  // forever, and if the address reappears later it gets a new id and shows
-  // up as a duplicate next to the orphaned old row.
-  if (expiredIds.length > 0) {
+  // Delete expired AND merged-away-duplicate properties from Supabase too —
+  // otherwise the row stays forever: an expired one would look "new" (with
+  // a fresh first_seen_date) if the address ever reappears, and a merged
+  // duplicate would just get silently re-merged in memory every day
+  // without the raw table (which the admin panel reads directly) ever
+  // actually losing the extra row.
+  if (idsToDeleteFromSupabase.length > 0) {
     try {
-      await deleteProperties(expiredIds);
-      console.log(`   🗑️  Removed ${expiredIds.length} expired listing(s) from Supabase`);
+      await deleteProperties(idsToDeleteFromSupabase);
+      console.log(`   🗑️  Removed ${idsToDeleteFromSupabase.length} expired/merged listing(s) from Supabase`);
     } catch (err) {
       console.error(`   ⚠️  Supabase DB delete failed: ${err.message}`);
     }

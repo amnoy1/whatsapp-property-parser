@@ -56,7 +56,8 @@ async function main() {
   // Within each same-address bucket, cluster rows further by
   // looksLikeSameProperty — only rows in the same cluster are duplicates.
   const idsToDelete = [];
-  let dupClusters = 0;
+  const updates     = []; // { id, first_seen_date, last_seen_date, price }
+  let dupClusters   = 0;
   for (const [key, list] of byAddr) {
     if (list.length < 2) continue;
 
@@ -74,8 +75,13 @@ async function main() {
       }
       dupClusters++;
 
-      // Keep the row with the most recent last_seen_date (most current data).
-      // Tie-break on first_seen_date (earlier = original listing).
+      // The surviving row is whichever was most recently seen — but its
+      // first_seen_date/last_seen_date/price get corrected to the merge of
+      // the WHOLE cluster, exactly like property-store.js's deduplicateStore.
+      // Keeping the "most recent" row's OWN first_seen_date verbatim was the
+      // 2026-09-23 bug: a freshly re-added duplicate would win "most recent"
+      // and its bogus today's-date first_seen_date would silently overwrite
+      // the true, older one instead of being corrected.
       const sorted = [...cluster].sort((a, b) => {
         if (a.last_seen_date !== b.last_seen_date) {
           return a.last_seen_date > b.last_seen_date ? -1 : 1;
@@ -85,16 +91,21 @@ async function main() {
       const keep    = sorted[0];
       const removed = sorted.slice(1);
 
+      const mergedFirstSeen = cluster.reduce((min, p) => p.first_seen_date < min ? p.first_seen_date : min, keep.first_seen_date);
+      const mergedLastSeen  = cluster.reduce((max, p) => p.last_seen_date > max ? p.last_seen_date : max, keep.last_seen_date);
+      const mergedPrice     = cluster.reduce((min, p) => (p.price != null && (min == null || p.price < min)) ? p.price : min, null);
+
       console.log(`\n${list[0].address} (${list[0].city}) — ${cluster.length} rows, same listing`);
-      console.log(`  KEEP   ${keep.id} | last_seen: ${keep.last_seen_date} | price: ${keep.price}`);
+      console.log(`  KEEP   ${keep.id} | first_seen: ${keep.first_seen_date} → ${mergedFirstSeen} | last_seen: ${keep.last_seen_date} → ${mergedLastSeen} | price: ${keep.price} → ${mergedPrice}`);
       for (const r of removed) {
-        console.log(`  DELETE ${r.id} | last_seen: ${r.last_seen_date} | price: ${r.price}`);
+        console.log(`  DELETE ${r.id} | first_seen: ${r.first_seen_date} | last_seen: ${r.last_seen_date} | price: ${r.price}`);
         idsToDelete.push(r.id);
       }
+      updates.push({ id: keep.id, first_seen_date: mergedFirstSeen, last_seen_date: mergedLastSeen, price: mergedPrice });
     }
   }
 
-  console.log(`\n${idsToDelete.length} row(s) to delete across ${dupClusters} duplicate cluster(s).`);
+  console.log(`\n${idsToDelete.length} row(s) to delete, ${updates.length} row(s) to correct, across ${dupClusters} duplicate cluster(s).`);
 
   if (dryRun) {
     console.log('\n--dry-run: no changes made.');
@@ -106,13 +117,21 @@ async function main() {
     return;
   }
 
+  for (const u of updates) {
+    const { error: upErr } = await supabase
+      .from('whatsapp_properties')
+      .update({ first_seen_date: u.first_seen_date, last_seen_date: u.last_seen_date, price: u.price })
+      .eq('id', u.id);
+    if (upErr) throw new Error(`Update failed for ${u.id}: ${upErr.message}`);
+  }
+
   const { error: delError } = await supabase
     .from('whatsapp_properties')
     .delete()
     .in('id', idsToDelete);
   if (delError) throw new Error(`Delete failed: ${delError.message}`);
 
-  console.log(`\n✅ Deleted ${idsToDelete.length} duplicate row(s).`);
+  console.log(`\n✅ Corrected ${updates.length} row(s), deleted ${idsToDelete.length} duplicate row(s).`);
 }
 
 main().catch(err => {

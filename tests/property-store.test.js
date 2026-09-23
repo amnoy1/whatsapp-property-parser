@@ -118,7 +118,22 @@ test('deduplicateStore keeps two distinct listings that share an address with no
     { id: '2', address: 'רוטשילד', property_type: 'פנטהאוז', rooms: 4, price: 2690000, first_seen_date: '2026-07-27', last_seen_date: '2026-07-27' },
   ];
   const result = deduplicateStore(props);
-  assert.equal(result.length, 2);
+  assert.equal(result.properties.length, 2);
+  assert.deepEqual(result.removedIds, []);
+});
+
+test('deduplicateStore merges a real duplicate and keeps the EARLIEST first_seen_date', () => {
+  // Reproduces the 2026-09-23 bug: a re-added duplicate must not let the
+  // merged record's first_seen_date jump forward to the newer copy's date.
+  const props = [
+    { id: 'old', address: 'חניתה 13', property_type: 'דירת גן', rooms: 3, price: 3850000, first_seen_date: '2026-09-08', last_seen_date: '2026-09-10' },
+    { id: 'new', address: 'חניתה 13', property_type: 'דירת גן', rooms: 3, price: 3850000, first_seen_date: '2026-09-23', last_seen_date: '2026-09-23' },
+  ];
+  const result = deduplicateStore(props);
+  assert.equal(result.properties.length, 1);
+  assert.equal(result.properties[0].first_seen_date, '2026-09-08');
+  assert.equal(result.properties[0].last_seen_date, '2026-09-23');
+  assert.deepEqual(result.removedIds, ['new']);
 });
 
 test('removeExpired removes properties not seen in N days', () => {

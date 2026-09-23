@@ -128,14 +128,23 @@ function mergeProperty(properties, newProp) {
 }
 
 /**
- * Deduplicate an existing list by normalized address.
- * Keeps the record with the earliest first_seen_date and the lowest price.
- * Call this once after load() to clean up historical duplicates.
+ * Deduplicate an existing list by normalized address (gated by
+ * looksLikeSameProperty, so two different real listings on the same
+ * street are never merged). Keeps the earliest first_seen_date, the
+ * latest last_seen_date, and the lowest price across a merged group.
+ *
+ * Returns the kept properties plus the ids of the ones merged away, so
+ * the caller can also delete those rows from Supabase — otherwise the
+ * merge only happens in memory for this run, the "loser" row is never
+ * actually removed from the table, and the same pair gets silently
+ * re-merged (and re-ignored) every single day without ever disappearing
+ * from what the admin panel reads directly.
  */
 function deduplicateStore(properties) {
   const seen = new Map(); // normalizedAddr → indices in result sharing that address
 
-  const result = [];
+  const result     = [];
+  const removedIds = [];
   for (const prop of properties) {
     const key = normalizeAddress(prop.address);
     if (!key) {
@@ -152,6 +161,7 @@ function deduplicateStore(properties) {
     } else {
       // Merge: keep earliest first_seen, latest last_seen, lowest price
       const existing = result[matchIdx];
+      if (prop.id && prop.id !== existing.id) removedIds.push(prop.id);
       result[matchIdx] = {
         ...existing,
         first_seen_date: existing.first_seen_date < prop.first_seen_date
@@ -164,7 +174,7 @@ function deduplicateStore(properties) {
       };
     }
   }
-  return result;
+  return { properties: result, removedIds };
 }
 
 /**

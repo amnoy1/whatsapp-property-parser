@@ -8,7 +8,7 @@ const { connect, fetchGroupMessages, disconnect } = require('./whatsapp-client')
 const { extractProperties }       = require('./property-extractor');
 const { generateExcel }           = require('./excel-generator');
 const { generateHtml }            = require('./html-generator');
-const { upsertProperties, deleteProperties, uploadToStorage } = require('./supabase-uploader');
+const { fetchAllProperties, upsertProperties, deleteProperties, uploadToStorage } = require('./supabase-uploader');
 const { enrichAllNeighborhoods, backfillMissingNeighborhoods } = require('./neighborhood-enrichment');
 const store = require('./property-store');
 
@@ -108,8 +108,14 @@ async function main() {
   console.log(`\n🏠 WhatsApp Property Report — ${dateFmt}`);
   console.log('─'.repeat(50));
 
-  // 1. Load store + deduplicate + remove expired
-  let properties = store.load();
+  // 1. Load current state from Supabase (source of truth — not the local
+  // file) + deduplicate + remove expired. Reading live state here is what
+  // makes "does this property already exist" a real check instead of a
+  // guess: a lost/reset local cache can no longer cause a listing to be
+  // re-added as a duplicate, because there's no local cache in the loop.
+  console.log('\n[1/5] Reading current state from Supabase...');
+  let properties = await fetchAllProperties();
+  console.log(`   📥 ${properties.length} properties fetched`);
   const beforeDedup = properties.length;
   properties = store.deduplicateStore(properties);
   const dupsRemoved = beforeDedup - properties.length;
@@ -123,7 +129,7 @@ async function main() {
   console.log(`   📦 ${properties.length} properties in database`);
 
   // 2. Connect to WhatsApp
-  console.log('\n[1/4] Connecting to WhatsApp...');
+  console.log('\n[2/5] Connecting to WhatsApp...');
   const client = await connect();
   console.log('   ✅ Connected');
 
@@ -142,7 +148,7 @@ async function main() {
     console.log(`   📅 Catching up ${missedDays} missed day(s)`);
   }
 
-  console.log(`\n[2/4] Fetching messages since ${new Date(sinceMs).toLocaleString('he-IL')}...`);
+  console.log(`\n[3/5] Fetching messages since ${new Date(sinceMs).toLocaleString('he-IL')}...`);
   const allMessages = [];
   for (const group of groups) {
     try {
@@ -160,7 +166,7 @@ async function main() {
   saveLastFetchMs(windowEndMs);
 
   // 4. Extract properties with Claude — each live message = its own block
-  console.log('\n[3/4] Extracting properties...');
+  console.log('\n[4/5] Extracting properties...');
   const blocks    = allMessages.map(m => ({ sender: m.sender, date: m.date, text: m.text }));
   const extracted = await extractProperties(blocks);
   console.log(`   ${extracted.length} listings extracted from ${blocks.length} messages`);
@@ -186,11 +192,12 @@ async function main() {
   }
   console.log(`   ✓ Added: ${stats.added} | ↻ Updated: ${stats.updated} | = Skipped: ${stats.skipped}`);
 
-  // 6. Persist store
+  // 6. Local backup snapshot only — Supabase (step 1) is the source of
+  // truth for matching, this file is never read back for that decision.
   store.save(properties);
 
   // 7. Generate Excel + HTML and upload to Supabase
-  console.log('\n[4/4] Generating report & uploading to Supabase...');
+  console.log('\n[5/5] Generating report & uploading to Supabase...');
   const excelBuffer  = await generateExcel(properties);
   const updatedCount = properties.filter(p => p.previous_price != null).length;
 
@@ -257,8 +264,18 @@ async function main() {
     console.error(`   ⚠️  Neighborhood backfill failed: ${err.message}`);
   }
 
-  // 9. Reset price flags + save
-  store.save(store.resetPreviousPrices(properties));
+  // 9. Reset "price just changed" flags for the next run. This now has to
+  // be pushed back to Supabase too (not just the local backup) — Supabase
+  // is what step 1 reads next time, so without this the "price just
+  // dropped" flag would stay stuck forever instead of clearing after
+  // today's report has shown it once.
+  const resetProperties = store.resetPreviousPrices(properties);
+  store.save(resetProperties);
+  try {
+    await upsertProperties(resetProperties);
+  } catch (err) {
+    console.error(`   ⚠️  Supabase previous_price reset failed: ${err.message}`);
+  }
 
   // 10. Disconnect
   await disconnect(client);

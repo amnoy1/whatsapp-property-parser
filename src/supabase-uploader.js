@@ -10,6 +10,23 @@ function getClient() {
 }
 
 /**
+ * Fetch the current state of the `whatsapp_properties` table. This is the
+ * source of truth for "does this property already exist" — every run reads
+ * it fresh instead of trusting a local file, so a lost/reset local cache
+ * can never cause the same listing to be re-added as a duplicate.
+ * @returns {Promise<Array>}
+ */
+async function fetchAllProperties() {
+  const supabase = getClient();
+  const { data, error } = await supabase
+    .from('whatsapp_properties')
+    .select('*');
+
+  if (error) throw new Error(`Supabase DB fetch failed: ${error.message}`);
+  return data || [];
+}
+
+/**
  * Upsert all properties into the Supabase `properties` table.
  * Uses the property `id` (UUID) as the conflict key.
  * @param {Array} properties
@@ -94,4 +111,4 @@ async function uploadToStorage(buffer, filename, contentType) {
   return data.publicUrl;
 }
 
-module.exports = { upsertProperties, deleteProperties, uploadToStorage };
+module.exports = { fetchAllProperties, upsertProperties, deleteProperties, uploadToStorage };

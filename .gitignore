@@ -3,6 +3,7 @@ node_modules/
 input/*.txt
 input/*.zip
 .wwebjs_auth/
+.wwebjs_cache/
 data/
 .superpowers/
 logs/

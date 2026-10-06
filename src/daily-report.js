@@ -11,6 +11,7 @@ const { generateHtml }            = require('./html-generator');
 const { fetchAllProperties, upsertProperties, deleteProperties, uploadToStorage } = require('./supabase-uploader');
 const { enrichAllNeighborhoods, backfillMissingNeighborhoods } = require('./neighborhood-enrichment');
 const store = require('./property-store');
+const { sendAlert } = require('./alert');
 
 // ── lock file (prevents double-runs) ─────────────────────────────────────────
 
@@ -153,20 +154,43 @@ async function main() {
 
   console.log(`\n[3/5] Fetching messages since ${new Date(sinceMs).toLocaleString('he-IL')}...`);
   const allMessages = [];
+  const failedGroups = [];  // threw on both attempts — nothing read
+  const partialGroups = []; // read, but WhatsApp stopped before the window's start
   for (const group of groups) {
-    try {
-      const msgs = await fetchGroupMessages(client, group, sinceMs);
-      console.log(`   ${group}: ${msgs.length} messages`);
-      allMessages.push(...msgs);
-    } catch (err) {
-      console.error(`   ⚠️  ${group}: ${err.message}`);
-      if (process.env.DEBUG) console.error(err.stack || err);
+    let result = null;
+    for (let attempt = 1; attempt <= 2 && !result; attempt++) {
+      try {
+        result = await fetchGroupMessages(client, group, sinceMs);
+      } catch (err) {
+        console.error(`   ⚠️  ${group} (attempt ${attempt}/2): ${err.message}`);
+        if (process.env.DEBUG) console.error(err.stack || err);
+      }
     }
+    if (!result) { failedGroups.push(group); continue; }
+    console.log(`   ${group}: ${result.messages.length} messages${result.incomplete ? ' (partial — WhatsApp stopped loading history)' : ''}`);
+    if (result.incomplete) partialGroups.push(group);
+    allMessages.push(...result.messages);
   }
   console.log(`   Total: ${allMessages.length} messages`);
 
-  // Checkpoint: record that we've successfully fetched up to windowEndMs
-  saveLastFetchMs(windowEndMs);
+  // Checkpoint: record that we've fetched up to windowEndMs — but ONLY if every
+  // group was fully read. Before, a skipped group's messages were lost for good
+  // because the day was marked done anyway. Holding the checkpoint makes the next
+  // run re-read the same window; the store's dedup keeps that from double-adding.
+  if (!failedGroups.length && !partialGroups.length) {
+    saveLastFetchMs(windowEndMs);
+  } else {
+    console.log('   ⏸  Checkpoint NOT advanced — next run will re-read this window');
+    const lines = [
+      ...failedGroups.map(g => `• ${g} — לא נקראה בכלל`),
+      ...partialGroups.map(g => `• ${g} — נקראה חלקית`),
+    ];
+    await sendAlert(
+      `⚠️ הריצה היומית הצליחה חלקית:\n${lines.join('\n')}\n\n` +
+      `שאר הקבוצות עודכנו בטבלה. הריצה הבאה תנסה שוב את הקבוצות האלה אוטומטית — ` +
+      `אם ההודעה הזו חוזרת כמה ימים ברצף, צריך לבדוק.`
+    );
+  }
 
   // 4. Extract properties with Claude — each live message = its own block
   console.log('\n[4/5] Extracting properties...');
@@ -240,6 +264,7 @@ async function main() {
     console.log(`   ✅ Supabase DB updated — ${count} properties`);
   } catch (err) {
     console.error(`   ⚠️  Supabase DB upsert failed: ${err.message}`);
+    await sendAlert(`🔴 העדכון לטבלה ב-Supabase נכשל — ניר לא יראה את הנכסים של היום:\n${err.message}`);
   }
 
   // Delete expired AND merged-away-duplicate properties from Supabase too —
@@ -290,9 +315,16 @@ async function main() {
   console.log('\n✅ Done!\n');
 }
 
-main().catch(err => {
+main().catch(async err => {
   releaseLock();
   console.error('\n❌ Fatal error:', err.message);
   if (process.env.DEBUG) console.error(err.stack);
+  const needsQr = err.message.startsWith('WhatsApp auth failure');
+  await sendAlert(needsQr
+    ? '🔴 הריצה היומית נכשלה — ווצאפ ניתק את החיבור וצריך לסרוק QR מחדש.\n\n' +
+      'להפעיל את חבר-ווצאפ.bat בתיקייה C:\\מנגו AI\\whatsapp-property-parser ולסרוק מהטלפון.\n' +
+      'עד אז הטבלה (וניר) לא מתעדכנים.'
+    : `🔴 הריצה היומית נכשלה:\n${err.message}\n\nעד שזה מטופל הטבלה (וניר) לא מתעדכנים.`
+  );
   process.exit(1);
 });

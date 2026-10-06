@@ -5,6 +5,9 @@ const fs   = require('fs');
 const path = require('path');
 
 const CONNECT_TIMEOUT_MS = 180_000; // 3 minutes
+const PROTOCOL_TIMEOUT_MS   = 300_000; // 5 minutes — puppeteer's hard limit per page call
+const LOAD_CALL_TIMEOUT_MS  = 60_000;  // one "load earlier messages" request
+const GROUP_FETCH_BUDGET_MS = 240_000; // whole group — must stay under PROTOCOL_TIMEOUT_MS
 
 function _findChrome() {
   const candidates = [
@@ -24,7 +27,7 @@ function _createClient() {
     puppeteer: {
       headless: true,
       executablePath: _findChrome(),
-      protocolTimeout: 300_000,   // 5 minutes — getChats() can be slow on first load
+      protocolTimeout: PROTOCOL_TIMEOUT_MS,   // getChats() can be slow on first load
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
@@ -60,6 +63,13 @@ async function connect() {
           clearTimeout(timer);
           reject(new Error(`WhatsApp auth failure: ${msg}`));
         });
+        // A QR request means the saved session was logged out on WhatsApp's side.
+        // Headless, nobody can scan it — without this the run just hangs until the
+        // timeout and looks like a network problem (that's how Oct 2026 went unnoticed).
+        client.on('qr', () => {
+          clearTimeout(timer);
+          reject(new Error('WhatsApp auth failure: session logged out, QR re-scan needed'));
+        });
 
         client.initialize();
       });
@@ -91,10 +101,20 @@ async function fetchGroupMessages(client, groupName, sinceMs) {
   // getChats() fails in current WA Web because getChatModel() throws a minified "r" error
   // for some chat types. Instead, access the WA store directly to find the group and
   // read its messages — bypasses getChatModel entirely.
-  const result = await client.pupPage.evaluate(async (name, cutoff) => {
+  const result = await client.pupPage.evaluate(async (name, cutoff, callTimeoutMs, budgetMs) => {
     const allChats = window.require('WAWebCollections').Chat.getModelsArray();
     const chat = allChats.find(c => c.name === name);
     if (!chat) return { error: 'not_found' };
+
+    // loadEarlierMsgs sometimes never resolves. With no limit of its own it hung
+    // until puppeteer's 5-min protocolTimeout killed the whole call and the group
+    // was skipped (22.6, 29.6, 27.8, 30.9 — always groups 2/3). Now each call gets
+    // its own limit, and the group a total budget that stays under protocolTimeout,
+    // so a hang costs us only the history we hadn't loaded yet, not the group.
+    const deadline = Date.now() + budgetMs;
+    const TIMED_OUT = Symbol('timeout');
+    const withTimeout = (p, ms) => Promise.race([p, new Promise(r => setTimeout(() => r(TIMED_OUT), ms))]);
+    let incomplete = false;
 
     // Load earlier messages from the server until the oldest loaded message
     // is before the cutoff. WA Web only keeps ~50 msgs in memory by default;
@@ -112,12 +132,24 @@ async function fetchGroupMessages(client, groupName, sinceMs) {
         const oldestTs = all.reduce((min, m) => Math.min(min, m.t * 1000), Infinity);
         if (oldestTs <= cutoff) break;        // history now covers the full window
       }
-      const loaded = await loadEarlier({ chat });
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) { incomplete = true; break; }
+      const loaded = await withTimeout(loadEarlier({ chat }), Math.min(callTimeoutMs, remaining));
+      if (loaded === TIMED_OUT) { incomplete = true; break; }
       if (!loaded || !loaded.length) break;  // server has no more history
+    }
+
+    // Stopped early on a timeout — but if what did load already reaches the
+    // cutoff, the window is fully covered and nothing is missing.
+    if (incomplete) {
+      const all = chat.msgs.getModelsArray();
+      const oldestTs = all.reduce((min, m) => Math.min(min, m.t * 1000), Infinity);
+      if (all.length && oldestTs <= cutoff) incomplete = false;
     }
 
     const msgs = chat.msgs.getModelsArray();
     return {
+      incomplete,
       messages: msgs
         .filter(m => !m.isNotification && !m.id.fromMe && m.body && m.t * 1000 >= cutoff)
         .map(m => ({
@@ -127,10 +159,12 @@ async function fetchGroupMessages(client, groupName, sinceMs) {
           text:   m.body,
         })),
     };
-  }, groupName, cutoffMs);
+  }, groupName, cutoffMs, LOAD_CALL_TIMEOUT_MS, GROUP_FETCH_BUDGET_MS);
 
   if (result.error === 'not_found') throw new Error(`WhatsApp group not found: "${groupName}"`);
-  return result.messages;
+  // `incomplete` = WhatsApp stopped answering before history reached the cutoff;
+  // the messages are real but older ones in the window may be missing.
+  return { messages: result.messages, incomplete: result.incomplete };
 }
 
 /**

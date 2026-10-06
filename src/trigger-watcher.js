@@ -153,7 +153,13 @@ async function main() {
     .subscribe((status, err) => {
       if (status === 'SUBSCRIBED') log('📡 Realtime subscription active');
       if (status === 'CHANNEL_ERROR') log(`⚠️  Realtime error: ${err?.message}`);
-      if (status === 'CLOSED') log('📡 Realtime channel closed — reconnecting...');
+      // CLOSED is final — supabase-js does not rejoin by itself. The old message
+      // said "reconnecting" but nothing did, and the watcher sat deaf from 22.8.
+      // Exit instead; run-trigger-watcher.bat restarts us with a fresh channel.
+      if (status === 'CLOSED') {
+        log('📡 Realtime channel closed — exiting so the .bat loop restarts the watcher');
+        setTimeout(() => process.exit(1), 1000);
+      }
     });
 
   // Keep the process alive

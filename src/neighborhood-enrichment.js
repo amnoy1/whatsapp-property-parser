@@ -2,7 +2,7 @@
 
 const { createClient } = require('@supabase/supabase-js');
 const {
-  enrichNeighborhoodsFromDB,
+  normalizeNeighborhoods,
   extractStreetName,
   getCitiesWithCoverage,
   saveStreetNeighborhood,
@@ -41,7 +41,11 @@ function selectHealCandidates(geocodedProperties, coveredCities) {
  * @returns {Promise<{dbFound: number, geocoded: number, healed: number}>}
  */
 async function enrichAllNeighborhoods(properties) {
-  const dbFound = await enrichNeighborhoodsFromDB(properties);
+  // The curated table first: street map wins, then the message's own
+  // neighborhood canonicalized, then an address that is a neighborhood name.
+  const before = properties.filter(p => !p.neighborhood).length;
+  const norm = await normalizeNeighborhoods(properties);
+  const dbFound = before - properties.filter(p => !p.neighborhood).length;
 
   let geocoded = 0;
   let healed = 0;
@@ -61,7 +65,7 @@ async function enrichAllNeighborhoods(properties) {
     }
   }
 
-  return { dbFound, geocoded, healed };
+  return { dbFound, geocoded, healed, ...norm };
 }
 
 /**

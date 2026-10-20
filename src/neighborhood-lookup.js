@@ -102,7 +102,29 @@ function candidateStreets(address) {
   const withoutAnyQuotes = base.replace(/["'׳״]/g, '');
   if (withoutAnyQuotes !== base) candidates.add(withoutAnyQuotes);
 
+  // A glued "ב" ("in"): "בששת הימים 14", "במשעול האהבה". Tried last, so a
+  // real street that starts with ב (ביאליק, בר אילן) always matches first.
+  for (const c of [...candidates]) {
+    const unglued = stripGluedBet(c);
+    if (unglued) {
+      candidates.add(unglued);
+      const reStripped = unglued.replace(STREET_PREFIX_RE, '').trim();
+      if (reStripped && reStripped !== unglued) candidates.add(reStripped);
+    }
+  }
+
   return [...candidates];
+}
+
+// "בששת הימים" -> "ששת הימים"; null when there's no glued ב to strip.
+function stripGluedBet(name) {
+  if (!name || name.length < 4 || !name.startsWith('ב')) return null;
+  return name.slice(1);
+}
+
+// Spelling variants with a doubled yod or vav collapsed: "וייצמן" -> "ויצמן".
+function collapseDoubledLetters(name) {
+  return name.replace(/יי/g, 'י').replace(/וו/g, 'ו');
 }
 
 /**
@@ -128,9 +150,24 @@ function candidateStreetsFromAddress(address) {
  */
 function streetVariants(name) {
   if (!name) return [];
-  const n = normalizeQuotes(name);
-  if (n.startsWith('ה') && n.length > 1) return [n, n.slice(1)];
-  return [n, 'ה' + n];
+  const base = normalizeQuotes(name);
+  // An ASCII hyphen reads as a space too: "בר-אילן" = "בר אילן".
+  const forms = new Set([base, base.replace(/\s*-\s*/g, ' ')]);
+  for (const f of [...forms]) forms.add(collapseDoubledLetters(f));
+  const out = [];
+  const push = (n) => {
+    if (n.startsWith('ה') && n.length > 1) out.push(n, n.slice(1));
+    else out.push(n, 'ה' + n);
+  };
+  for (const n of forms) push(n);
+  // Last resort, full vs. defective spelling: "השיקמה" = "השקמה". Yods are
+  // dropped on both sides (the table side goes through here too), and these
+  // keys come after every exact form, so they never shadow a real match.
+  for (const n of forms) {
+    const noYod = n.replace(/י/g, '');
+    if (noYod !== n && noYod.length >= 3) push(noYod);
+  }
+  return [...new Set(out)];
 }
 
 /**
@@ -277,7 +314,188 @@ async function saveStreetNeighborhood(city, street, neighborhood) {
   }
 }
 
+// ---------- Canonical neighborhood names (Amir, 2026-10-20) ----------
+//
+// The official name of a neighborhood is the one in street_neighborhoods, the
+// table Amir curates in the admin "street map" tab. Brokers write the same
+// neighborhood many ways ("שכונת הפרחים", "בירוקה", "זמר העברי הירוקה"), and
+// every search door (Nir, Telegram, admin, the public site) inherits whatever
+// lands in whatsapp_properties. Decisions:
+//   1. The admin table's names are the canonical list.
+//   2. "הזמר העברי" (fixed from "הזמר העיברי"), but both spellings are read.
+//   3. The green neighborhood is "הירוקה" (not "כפר סבא הירוקה").
+//   4. When the message names one neighborhood and the table maps the street
+//      to another, the table wins.
+
+// Known variants -> canonical name. Keys are compared after cleanup (quotes
+// normalized, "שכונת" / the city name / a glued ב / a trailing number dropped).
+const NEIGHBORHOOD_ALIASES = {
+  'הזמר העיברי': 'הזמר העברי',
+  'זמר העיברי': 'הזמר העברי',
+  'זמר העברי': 'הזמר העברי',
+  'זמר העברי הירוקה': 'הזמר העברי',
+  'הזמר העברי הירוקה': 'הזמר העברי',
+  'כפר סבא הירוקה': 'הירוקה',
+  'השכונה הירוקה': 'הירוקה',
+  'ירוקה': 'הירוקה',
+  'הראשונים': 'תקומה הראשונים',
+  'תקומה': 'תקומה הראשונים',
+  'הדרים החדשה': 'הדרים',
+  'גני השרון': 'גני שרון',
+  'שיכוני מזרחי': 'שיכון מזרחי',
+  'עליה': 'עלייה',
+  'ותיקים': 'שיכון ותיקים',
+};
+
+function cleanNeighborhoodForms(raw, city) {
+  if (!raw) return [];
+  let base = normalizeQuotes(String(raw)).replace(/\s+/g, ' ').trim();
+  base = base.replace(/\s+\d+[א-ת]?$/, '').trim(); // "ירוקה 80" -> "ירוקה"
+  const forms = new Set([base]);
+  const add = (f) => { if (f && f.trim().length >= 2) forms.add(f.trim()); };
+  for (const f of [...forms]) add(f.replace(/^(שכונת|שכונה)\s+/, ''));
+  if (city) for (const f of [...forms]) if (f.startsWith(city + ' ')) add(f.slice(city.length + 1));
+  for (const f of [...forms]) { const u = stripGluedBet(f); if (u) add(u); }
+  for (const f of [...forms]) add(collapseDoubledLetters(f));
+  return [...forms];
+}
+
+/**
+ * The canonical name for a neighborhood as written in a message, or null when
+ * nothing matches (the caller keeps the cleaned text then).
+ * @param {string} raw
+ * @param {Set<string>} canonical names from street_neighborhoods for the city
+ * @param {string} [city]
+ */
+function canonicalNeighborhood(raw, canonical, city) {
+  for (const f of cleanNeighborhoodForms(raw, city)) {
+    if (NEIGHBORHOOD_ALIASES[f]) return NEIGHBORHOOD_ALIASES[f];
+    if (canonical.has(f)) return f;
+    const flip = f.startsWith('ה') ? f.slice(1) : 'ה' + f;
+    if (canonical.has(flip)) return flip;
+    if (NEIGHBORHOOD_ALIASES[flip]) return NEIGHBORHOOD_ALIASES[flip];
+  }
+  return null;
+}
+
+// "שכונת הפרחים" -> "הפרחים" when no canonical match: never store the
+// "שכונת" wrapper or a trailing number, even for a name we don't know.
+function cleanedNeighborhoodText(raw) {
+  if (!raw) return null;
+  const t = normalizeQuotes(String(raw)).replace(/\s+/g, ' ').trim();
+  // "שכונת 2003" is a name in itself (a number is all there is): keep it whole.
+  if (/^(שכונת|שכונה)\s+\d+$/.test(t)) return t;
+  const cleaned = t.replace(/^(שכונת|שכונה)\s+/, '').replace(/\s+\d+[א-ת]?$/, '').trim();
+  return cleaned || null;
+}
+
+/**
+ * An address that is really a neighborhood ("פרחים", "ירוקה 80", "שכונת
+ * הפארק"): its leading words, canonicalized. Only an exact canonical/alias
+ * match counts, so a real street name is never mistaken for one.
+ */
+function neighborhoodFromAddress(address, canonical, city) {
+  if (!address) return null;
+  for (const part of normalizeQuotes(address).split(',').map(x => x.trim()).filter(Boolean)) {
+    const words = part.replace(/^(רחוב|רח'|רח)\s+/, '').split(/\s+/);
+    for (let i = words.length; i >= 1; i--) {
+      const hit = canonicalNeighborhood(words.slice(0, i).join(' '), canonical, city);
+      if (hit) return hit;
+    }
+  }
+  return null;
+}
+
+/**
+ * One pass over freshly extracted (or stored) properties, using the curated
+ * table: (1) the street map wins whenever the street resolves, overriding
+ * the message's own neighborhood; (2) otherwise the message's neighborhood is
+ * canonicalized; (3) otherwise an address that is itself a neighborhood name
+ * is used. Properties still without a neighborhood are left for geocoding.
+ *
+ * @param {Array} properties mutated in place
+ * @param {Array<{city, street, neighborhood}>} rows street_neighborhoods rows
+ * @returns {{fromStreet: number, canonicalized: number, fromAddress: number}}
+ */
+function normalizeNeighborhoodsWithRows(properties, rows) {
+  const lookupMap = new Map();
+  const canonByCity = new Map();
+  for (const row of rows || []) {
+    const canonName = NEIGHBORHOOD_ALIASES[row.neighborhood] || row.neighborhood;
+    for (const variant of expandStreetVariants(row.street)) {
+      const key = `${row.city}::${variant}`;
+      if (!lookupMap.has(key)) lookupMap.set(key, canonName);
+    }
+    if (!canonByCity.has(row.city)) canonByCity.set(row.city, new Set());
+    canonByCity.get(row.city).add(canonName);
+  }
+  const resolve = (streetName, city) => {
+    for (const variant of streetVariants(streetName)) {
+      const n = lookupMap.get(`${city}::${variant}`);
+      if (n) return n;
+    }
+    return null;
+  };
+
+  const stats = { fromStreet: 0, canonicalized: 0, fromAddress: 0 };
+  for (const prop of properties) {
+    const city = prop.city || 'כפר סבא';
+    const canonical = canonByCity.get(city) || new Set();
+
+    let fromStreet = null;
+    for (const candidate of candidateStreetsFromAddress(prop.address)) {
+      fromStreet = resolve(candidate, city);
+      if (fromStreet) break;
+    }
+    if (fromStreet) {
+      if (prop.neighborhood !== fromStreet) stats.fromStreet++;
+      prop.neighborhood = fromStreet;
+      continue;
+    }
+    if (prop.neighborhood) {
+      const canon = canonicalNeighborhood(prop.neighborhood, canonical, city);
+      const next = canon || cleanedNeighborhoodText(prop.neighborhood);
+      if (next !== prop.neighborhood) stats.canonicalized++;
+      prop.neighborhood = next;
+      continue;
+    }
+    const fromAddress = neighborhoodFromAddress(prop.address, canonical, city);
+    if (fromAddress) {
+      prop.neighborhood = fromAddress;
+      stats.fromAddress++;
+    }
+  }
+  return stats;
+}
+
+async function fetchStreetRows(cities) {
+  const supabase = getClient();
+  let q = supabase.from('street_neighborhoods').select('city, street, neighborhood');
+  if (cities) q = q.in('city', cities);
+  const { data, error } = await q;
+  if (error) throw new Error(`street_neighborhoods: ${error.message}`);
+  return data || [];
+}
+
+async function normalizeNeighborhoods(properties) {
+  const cities = [...new Set(properties.map(p => p.city || 'כפר סבא'))];
+  if (cities.length === 0) return { fromStreet: 0, canonicalized: 0, fromAddress: 0 };
+  try {
+    return normalizeNeighborhoodsWithRows(properties, await fetchStreetRows(cities));
+  } catch (err) {
+    console.error('[neighborhood-lookup] normalizeNeighborhoods failed:', err.message);
+    return { fromStreet: 0, canonicalized: 0, fromAddress: 0 };
+  }
+}
+
 module.exports = {
+  NEIGHBORHOOD_ALIASES,
+  canonicalNeighborhood,
+  cleanedNeighborhoodText,
+  neighborhoodFromAddress,
+  normalizeNeighborhoodsWithRows,
+  normalizeNeighborhoods,
+  fetchStreetRows,
   enrichNeighborhoodsFromDB,
   extractStreetName,
   candidateStreets,

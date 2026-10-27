@@ -28,7 +28,7 @@ const Anthropic = require('@anthropic-ai/sdk');
 const { createClient } = require('@supabase/supabase-js');
 const { connect } = require('./whatsapp-client');
 const { sendAlert } = require('./alert');
-const { normalizePhone, route, transcript, parseVerdict } = require('./private-chat-rules');
+const { normalizePhone, route, transcript, parseVerdict, firstLookFloor, pruneSeen } = require('./private-chat-rules');
 
 const ROOT        = path.join(__dirname, '..');
 const LOCK_FILE   = path.join(ROOT, 'data', 'running.lock');
@@ -60,18 +60,21 @@ function locked() {
   } catch { return false; }
 }
 
-// ── WhatsApp: private chats with messages since `sinceMs` ─────────────────────
+// ── WhatsApp: private chats with messages past their own cursor ──────────────
 
-async function readPrivateChats(client, sinceMs) {
-  return client.pupPage.evaluate(async (since) => {
+async function readPrivateChats(client, seen, floorS) {
+  return client.pupPage.evaluate(async (seen, floorS) => {
     const C = window.require('WAWebCollections');
     const api = window.require('WAWebApiContact');
     const loadEarlier = window.require('WAWebChatLoadMessages').loadEarlierMsgs;
-    const sinceS = since / 1000;
     const out = [];
     // isGroup is unreliable in current WA Web; the id's server is not.
-    const chats = C.Chat.getModelsArray().filter((c) => (c.id.server === 'lid' || c.id.server === 'c.us') && c.t >= sinceS);
+    // Each chat has its own cursor (the last message already read), so a message
+    // that reaches the PC late is still caught next hour (Sunny, 2026-10-27).
+    const cursorOf = (c) => Math.max(seen[c.id._serialized] || 0, floorS);
+    const chats = C.Chat.getModelsArray().filter((c) => (c.id.server === 'lid' || c.id.server === 'c.us') && c.t > cursorOf(c));
     for (const c of chats) {
+      const sinceS = cursorOf(c);
       let pn = null;
       try { pn = c.id.server === 'c.us' ? c.id.user : (api.getPhoneNumber(c.id) || {}).user || null; } catch {}
       const ct = C.Contact.get(c.id._serialized) || (pn ? C.Contact.get(pn + '@c.us') : null);
@@ -87,6 +90,8 @@ async function readPrivateChats(client, sinceMs) {
         .map((m) => ({ t: m.t, fromMe: !!m.id.fromMe, type: m.type, body: m.type === 'chat' ? m.body : null }))
         .sort((a, b) => a.t - b.t);
       out.push({
+        id: c.id._serialized,
+        cursor: sinceS,
         pn,
         saved: !!(ct && ct.isAddressBookContact),
         name: (ct && (ct.name || ct.pushname)) || null,
@@ -94,7 +99,7 @@ async function readPrivateChats(client, sinceMs) {
       });
     }
     return out;
-  }, sinceMs);
+  }, seen, floorS);
 }
 
 // ── the model ─────────────────────────────────────────────────────────────────
@@ -122,9 +127,9 @@ function promptFor(mode, context, fresh) {
 - summary: שורה אחת, עד 20 מילים: מי זה ומה הוא רוצה.`;
 }
 
-async function askModel(mode, chat, sinceS) {
-  const older = chat.msgs.filter((m) => m.t < sinceS);
-  const fresh = chat.msgs.filter((m) => m.t >= sinceS);
+async function askModel(mode, chat) {
+  const older = chat.msgs.filter((m) => m.t <= chat.cursor);
+  const fresh = chat.msgs.filter((m) => m.t > chat.cursor);
   const r = await anthropic.messages.create({
     model: MODEL,
     max_tokens: 300,
@@ -174,13 +179,14 @@ async function main() {
   const killer = setTimeout(() => { log('⚠️ run exceeded 10 min — stopping'); try { fs.unlinkSync(LOCK_FILE); } catch {} process.exit(1); }, MAX_RUN_MS);
 
   const state = readState();
-  const sinceMs = state.since || Date.now() - FIRST_RUN_DAYS * 86_400_000;
+  const nowS = Date.now() / 1000;
+  const floorS = firstLookFloor(state, nowS, FIRST_RUN_DAYS);
+  const seen = state.seen || {};
   const counts = { chats: 0, lead: 0, candidate: 0, check: 0, skip: 0, model: 0, written: 0, notRelevant: 0, errors: 0 };
   let client;
   try {
     client = await connect();
-    const snapshotMs = Date.now();
-    const chats = await readPrivateChats(client, sinceMs);
+    const chats = await readPrivateChats(client, seen, floorS);
     try { await client.destroy(); } catch {}
     client = null;
     counts.chats = chats.length;
@@ -193,35 +199,35 @@ async function main() {
     const cands = phones.length ? await must(sb.from('crm_lead_candidates').select('phone,status').in('phone', phones)).catch((e) => { log(`⚠️ candidates: ${e.message}`); return []; }) : [];
     const leadByPhone = new Map(leads.map((l) => [l.phone, l]));
     const candStatus = new Map(cands.map((c) => [c.phone, c.status]));
-    const sinceS = sinceMs / 1000;
 
     for (const chat of chats) {
       const phone = normalizePhone(chat.pn);
-      const fresh = chat.msgs.filter((m) => m.t >= sinceS);
+      const fresh = chat.msgs.filter((m) => m.t > chat.cursor);
+      const lastT = fresh.length ? fresh[fresh.length - 1].t : chat.cursor;
       const newTexts = fresh.map((m) => m.body).filter(Boolean);
       const r = route({ phone, saved: chat.saved, newTexts, leadPhones: new Set(leadByPhone.keys()), candidateStatus: candStatus.get(phone) });
       counts[r]++;
-      if (r === 'skip') continue;
+      if (r === 'skip') { seen[chat.id] = lastT; continue; }
       try {
-        const verdict = await askModel(r === 'lead' ? 'lead' : 'check', chat, sinceS);
+        const verdict = await askModel(r === 'lead' ? 'lead' : 'check', chat);
         counts.model++;
-        if (!verdict.relevant || !verdict.summary) { counts.notRelevant++; continue; }
+        if (!verdict.relevant || !verdict.summary) { counts.notRelevant++; seen[chat.id] = lastT; continue; }
         const lastIso = new Date(fresh[fresh.length - 1].t * 1000).toISOString();
         // Dry run shows only what WOULD reach the dashboard (the summary line), never messages.
         if (DRY) { counts.written++; console.log(`  ${r} ${phone.slice(0, 3)}…${phone.slice(-2)} ${verdict.kind || ''} | ${verdict.summary}${verdict.source ? ' | מקור: ' + verdict.source : ''}`); continue; }
         if (r === 'lead') await recordOnLead(sb, leadByPhone.get(phone), chat, verdict, lastIso, phone);
         else await recordCandidate(sb, phone, chat, verdict, lastIso);
         counts.written++;
+        seen[chat.id] = lastT;
       } catch (err) {
         counts.errors++;
         log(`⚠️ chat failed: ${String(err.message).slice(0, 160)}`);
       }
     }
 
-    // Move the checkpoint only when every chat went through; reruns are free
-    // (the timeline ref and the candidate's phone are unique).
-    if (!DRY && !counts.errors) writeState({ ...state, since: snapshotMs, lastOk: new Date().toISOString() });
-    log(`${DRY ? '[dry-run] ' : ''}since=${new Date(sinceMs).toISOString()} ${JSON.stringify(counts)}`);
+    // A chat that failed keeps its old cursor and is retried next hour; the rest move on.
+    if (!DRY) writeState({ ...state, since: undefined, start: typeof state.start === 'number' ? state.start : floorS, seen: pruneSeen(seen, nowS), lastOk: new Date().toISOString() });
+    log(`${DRY ? '[dry-run] ' : ''}floor=${new Date(floorS * 1000).toISOString()} ${JSON.stringify(counts)}`);
   } catch (err) {
     log(`❌ ${err.message}`);
     if (/auth failure|QR/i.test(err.message) && Date.now() - (state.alertedAt || 0) > ALERT_EVERY_MS) {

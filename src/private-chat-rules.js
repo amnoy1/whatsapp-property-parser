@@ -86,4 +86,22 @@ function parseVerdict(text) {
   }
 }
 
-module.exports = { normalizePhone, hasRealEstateWords, route, transcript, parseVerdict, REAL_ESTATE_WORDS };
+// ── the ledger: one cursor per chat (last message already read) ──────────────
+// A message can reach the PC hours after it was sent (the phone was offline, or
+// WhatsApp had not synced yet when the scan read). A single "read up to HH:MM"
+// checkpoint skips it forever; a cursor per chat catches it on the next run.
+const LATE_DAYS = 3; // how late a message may arrive and still be caught
+
+/** Oldest message time any chat is read from (seconds): the scan's fixed start, but never more than LATE_DAYS back. */
+function firstLookFloor(state, nowS, firstRunDays) {
+  const start = typeof state.start === 'number' ? state.start : nowS - firstRunDays * 86_400;
+  return Math.max(start, nowS - LATE_DAYS * 86_400);
+}
+
+/** Drop cursors that fall before any possible floor, so the state file stays small. */
+function pruneSeen(seen, nowS) {
+  const cut = nowS - LATE_DAYS * 86_400;
+  return Object.fromEntries(Object.entries(seen).filter(([, t]) => t >= cut));
+}
+
+module.exports = { normalizePhone, hasRealEstateWords, route, transcript, parseVerdict, firstLookFloor, pruneSeen, REAL_ESTATE_WORDS };

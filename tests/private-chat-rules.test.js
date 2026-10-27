@@ -2,7 +2,7 @@
 
 const { test } = require('node:test');
 const assert   = require('node:assert/strict');
-const { normalizePhone, hasRealEstateWords, route, transcript, parseVerdict } = require('../src/private-chat-rules');
+const { normalizePhone, hasRealEstateWords, route, transcript, parseVerdict, firstLookFloor, pruneSeen } = require('../src/private-chat-rules');
 
 const base = { phone: '0541234567', saved: true, newTexts: ['מה נשמע?'], leadPhones: new Set(), candidateStatus: undefined };
 
@@ -68,4 +68,16 @@ test('verdict: malformed output means "not real estate"; unknown kind -> other; 
   assert.equal(v.kind, 'other');
   assert.equal(v.source, null);
   assert.equal(v.property, 'נלקין');
+});
+
+test('ledger: first run looks 3 days back; later runs read from the fixed start, at most 3 days back', () => {
+  const now = 1793200000;
+  assert.equal(firstLookFloor({}, now, 3), now - 3 * 86_400);
+  assert.equal(firstLookFloor({ start: now - 3600 }, now, 3), now - 3600);
+  assert.equal(firstLookFloor({ start: now - 10 * 86_400 }, now, 3), now - 3 * 86_400);
+});
+
+test('ledger: old cursors are dropped, recent ones kept', () => {
+  const now = 1793200000;
+  assert.deepEqual(pruneSeen({ a: now - 100, b: now - 4 * 86_400 }, now), { a: now - 100 });
 });

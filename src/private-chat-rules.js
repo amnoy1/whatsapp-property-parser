@@ -38,8 +38,11 @@ function hasRealEstateWords(texts) {
  *   candidate = refresh the pending row; check = ask the model whether it is a
  *   real-estate inquiry; skip = nothing leaves the PC.
  */
+// Mango's own numbers: Nir / ManyChat (054) talks to 052 all day and is never a lead.
+const OWN_NUMBERS = new Set(['0545370056']);
+
 function route({ phone, saved, newTexts, leadPhones, candidateStatus }) {
-  if (!phone) return 'skip';
+  if (!phone || OWN_NUMBERS.has(phone)) return 'skip';
   if (!newTexts.length) return 'skip';
   if (leadPhones.has(phone)) return 'lead';
   if (candidateStatus === 'dismissed' || candidateStatus === 'approved') return 'skip';

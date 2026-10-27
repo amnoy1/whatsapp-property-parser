@@ -36,6 +36,10 @@ test('a dismissed or already-approved number is never asked about again; a pendi
   assert.equal(route({ ...base, candidateStatus: 'pending' }), 'candidate');
 });
 
+test("Nir's own ManyChat number (054) is never a lead, whatever it says", () => {
+  assert.equal(route({ ...base, phone: '0545370056', saved: false, newTexts: ['דירת 5 חדרים בכפר סבא'] }), 'skip');
+});
+
 test('no new text (only a voice note or a call) -> nothing to read', () => {
   assert.equal(route({ ...base, saved: false, newTexts: [] }), 'skip');
 });

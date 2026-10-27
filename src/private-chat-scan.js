@@ -1,0 +1,241 @@
+'use strict';
+
+/**
+ * private-chat-scan.js — hourly, READ ONLY scan of Amir's private WhatsApp
+ * chats (052), feeding the Mango dashboard (2026-10-27; the-system
+ * B-brain/03-projects/personal-assistant/spec.md section 10, step 2).
+ *
+ *   phone already a lead   -> one summary line on its timeline (whatsapp_amir)
+ *   real-estate inquiry    -> "לידים חדשים לאישור" (crm_lead_candidates), Amir approves
+ *   anything else          -> nothing leaves the PC
+ *
+ * Never sends, never marks read, never changes presence: it only reads WA
+ * Web's store. Shares the WhatsApp session with daily-report.js, so it takes
+ * the same lock and simply skips the hour if the report is running.
+ *
+ * Cost: runs only on chats with new messages; saved contacts pass a free word
+ * filter first; one Haiku call per chat that passes. First run: 3 days back.
+ *
+ *   node src/private-chat-scan.js            normal run
+ *   node src/private-chat-scan.js --dry-run  decide + call the model, print counts, write nothing
+ */
+
+require('dotenv').config();
+
+const fs   = require('fs');
+const path = require('path');
+const Anthropic = require('@anthropic-ai/sdk');
+const { createClient } = require('@supabase/supabase-js');
+const { connect } = require('./whatsapp-client');
+const { sendAlert } = require('./alert');
+const { normalizePhone, route, transcript, parseVerdict } = require('./private-chat-rules');
+
+const ROOT        = path.join(__dirname, '..');
+const LOCK_FILE   = path.join(ROOT, 'data', 'running.lock');
+const STATE_FILE  = path.join(ROOT, 'data', 'private-scan.json');
+const LOG_FILE    = path.join(ROOT, 'logs', 'private-scan.log');
+const LOCK_TIMEOUT_MS = 30 * 60 * 1000;
+const FIRST_RUN_DAYS  = 3;           // Amir: 3 days on the first run
+const MAX_RUN_MS      = 10 * 60_000; // never hold the session longer than this
+const ALERT_EVERY_MS  = 12 * 3_600_000;
+const MODEL = 'claude-haiku-4-5';
+const DRY = process.argv.includes('--dry-run');
+
+// ── small helpers ─────────────────────────────────────────────────────────────
+
+function ensureDir(p) { fs.mkdirSync(path.dirname(p), { recursive: true }); }
+function log(msg) {
+  const line = `[${new Date().toISOString()}] ${msg}`;
+  console.log(line);
+  try { ensureDir(LOG_FILE); fs.appendFileSync(LOG_FILE, line + '\n'); } catch {}
+}
+function readState() { try { return JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')); } catch { return {}; } }
+function writeState(s) { ensureDir(STATE_FILE); fs.writeFileSync(STATE_FILE, JSON.stringify(s, null, 2)); }
+
+function locked() {
+  if (!fs.existsSync(LOCK_FILE)) return false;
+  try {
+    if (Date.now() - fs.statSync(LOCK_FILE).mtimeMs > LOCK_TIMEOUT_MS) { fs.unlinkSync(LOCK_FILE); return false; }
+    return true;
+  } catch { return false; }
+}
+
+// ── WhatsApp: private chats with messages since `sinceMs` ─────────────────────
+
+async function readPrivateChats(client, sinceMs) {
+  return client.pupPage.evaluate(async (since) => {
+    const C = window.require('WAWebCollections');
+    const api = window.require('WAWebApiContact');
+    const loadEarlier = window.require('WAWebChatLoadMessages').loadEarlierMsgs;
+    const sinceS = since / 1000;
+    const out = [];
+    // isGroup is unreliable in current WA Web; the id's server is not.
+    const chats = C.Chat.getModelsArray().filter((c) => (c.id.server === 'lid' || c.id.server === 'c.us') && c.t >= sinceS);
+    for (const c of chats) {
+      let pn = null;
+      try { pn = c.id.server === 'c.us' ? c.id.user : (api.getPhoneNumber(c.id) || {}).user || null; } catch {}
+      const ct = C.Contact.get(c.id._serialized) || (pn ? C.Contact.get(pn + '@c.us') : null);
+      for (let i = 0; i < 6; i++) {
+        const all = c.msgs.getModelsArray();
+        const oldest = all.reduce((a, m) => Math.min(a, m.t), Infinity);
+        if (all.length && oldest <= sinceS) break;
+        const got = await Promise.race([loadEarlier({ chat: c }), new Promise((r) => setTimeout(() => r(null), 20000))]);
+        if (!got || !got.length) break;
+      }
+      const msgs = c.msgs.getModelsArray()
+        .filter((m) => !m.isNotification && m.type !== 'notification_template' && m.type !== 'call_log' && m.type !== 'e2e_notification')
+        .map((m) => ({ t: m.t, fromMe: !!m.id.fromMe, type: m.type, body: m.type === 'chat' ? m.body : null }))
+        .sort((a, b) => a.t - b.t);
+      out.push({
+        pn,
+        saved: !!(ct && ct.isAddressBookContact),
+        name: (ct && (ct.name || ct.pushname)) || null,
+        msgs,
+      });
+    }
+    return out;
+  }, sinceMs);
+}
+
+// ── the model ─────────────────────────────────────────────────────────────────
+
+const anthropic = new Anthropic();
+
+const SYSTEM = `אתה עוזר של אמיר, מתווך נדל"ן (מנגו נדל"ן, כפר סבא והסביבה). אתה קורא שיחת ווטסאפ פרטית של אמיר ומחזיר JSON תקין בלבד, בלי טקסט נוסף.`;
+
+function promptFor(mode, context, fresh) {
+  const convo = (context ? `הודעות קודמות (להקשר בלבד):\n${context}\n\n` : '') + `ההודעות החדשות:\n${fresh}`;
+  if (mode === 'lead') {
+    return `${convo}
+
+זה ליד קיים של אמיר. כתוב שורת סיכום אחת, עד 20 מילים, של מה שחדש בהודעות החדשות: מה הליד אמר או ביקש, מה סוכם, מה הצעד הבא.
+אם בהודעות החדשות אין שום דבר מהותי (רק תודה, אישור, אימוג'י, ברכה) - relevant=false.
+החזר: {"relevant": true/false, "summary": "..."}`;
+  }
+  return `${convo}
+
+האם הצד השני בשיחה הוא ליד עסקי לאמיר בתחום הנדל"ן? כן = מתעניין לקנות/לשכור נכס, בעל נכס שרוצה למכור/להשכיר, או מתווך שמציע נכס/לקוח/שיתוף פעולה.
+לא = שיחה אישית, משפחה, חברים, ספק, רואת חשבון או עו"ד בעניין שאינו נכס, שירות לקוחות, פרסומת.
+החזר: {"relevant": true/false, "kind": "buyer"|"seller"|"broker"|"other", "source": "...", "property": "...", "summary": "..."}
+- source: רק אם נאמר במפורש איך הגיע (למשל "ראיתי ביד2", "ראיתי את השלט", "X הפנה אותי"). אחרת null. אל תנחש.
+- property: הרחוב או הנכס שהוזכר, אחרת null.
+- summary: שורה אחת, עד 20 מילים: מי זה ומה הוא רוצה.`;
+}
+
+async function askModel(mode, chat, sinceS) {
+  const older = chat.msgs.filter((m) => m.t < sinceS);
+  const fresh = chat.msgs.filter((m) => m.t >= sinceS);
+  const r = await anthropic.messages.create({
+    model: MODEL,
+    max_tokens: 300,
+    system: SYSTEM,
+    messages: [{ role: 'user', content: promptFor(mode, transcript(older, chat.name, { maxMsgs: 10, maxChars: 1500 }), transcript(fresh, chat.name)) }],
+  });
+  return parseVerdict(r.content?.[0]?.text);
+}
+
+// ── Supabase writes (summaries only, never the messages) ──────────────────────
+
+function db() {
+  return createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY, { auth: { persistSession: false } });
+}
+
+async function must(p) {
+  const { data, error } = await p;
+  if (error) throw new Error(error.message);
+  return data;
+}
+
+async function recordOnLead(sb, lead, chat, verdict, lastIso, phone) {
+  await must(sb.from('crm_lead_interactions').upsert([{
+    lead_id: lead.id, channel: 'whatsapp_amir', occurred_at: lastIso,
+    summary: verdict.summary, body: verdict.summary, ref: `wa:${phone}:${lastIso}`, created_by: 'wa_scan',
+  }], { onConflict: 'channel,ref', ignoreDuplicates: true }));
+  const patch = { analyzed_at: null };
+  if (!lead.last_interaction_at || Date.parse(lead.last_interaction_at) < Date.parse(lastIso)) patch.last_interaction_at = lastIso;
+  await must(sb.from('crm_leads').update(patch).eq('id', lead.id));
+}
+
+async function recordCandidate(sb, phone, chat, verdict, lastIso) {
+  // Only fields the model actually found, so a refresh never wipes a known source/property.
+  const row = { phone, summary: verdict.summary, kind: verdict.kind, last_message_at: lastIso, updated_at: new Date().toISOString() };
+  if (chat.name) row.name = chat.name;
+  if (verdict.source) row.source = verdict.source;
+  if (verdict.property) row.property = verdict.property;
+  await must(sb.from('crm_lead_candidates').upsert([row], { onConflict: 'phone' }));
+}
+
+// ── main ──────────────────────────────────────────────────────────────────────
+
+async function main() {
+  if (locked()) { log('skip: WhatsApp session busy (daily report running)'); return; }
+  ensureDir(LOCK_FILE);
+  fs.writeFileSync(LOCK_FILE, `private-scan ${new Date().toISOString()}`);
+  const killer = setTimeout(() => { log('⚠️ run exceeded 10 min — stopping'); try { fs.unlinkSync(LOCK_FILE); } catch {} process.exit(1); }, MAX_RUN_MS);
+
+  const state = readState();
+  const sinceMs = state.since || Date.now() - FIRST_RUN_DAYS * 86_400_000;
+  const counts = { chats: 0, lead: 0, candidate: 0, check: 0, skip: 0, model: 0, written: 0, notRelevant: 0, errors: 0 };
+  let client;
+  try {
+    client = await connect();
+    const snapshotMs = Date.now();
+    const chats = await readPrivateChats(client, sinceMs);
+    try { await client.destroy(); } catch {}
+    client = null;
+    counts.chats = chats.length;
+
+    const sb = db();
+    const phones = [...new Set(chats.map((c) => normalizePhone(c.pn)).filter(Boolean))];
+    const leads = phones.length ? await must(sb.from('crm_leads').select('id,phone,last_interaction_at').in('phone', phones).is('archived_at', null)) : [];
+    // Before sql/016 runs the table is missing: read it as empty; the writes then
+    // fail, so the checkpoint stays and the next run retries the same chats.
+    const cands = phones.length ? await must(sb.from('crm_lead_candidates').select('phone,status').in('phone', phones)).catch((e) => { log(`⚠️ candidates: ${e.message}`); return []; }) : [];
+    const leadByPhone = new Map(leads.map((l) => [l.phone, l]));
+    const candStatus = new Map(cands.map((c) => [c.phone, c.status]));
+    const sinceS = sinceMs / 1000;
+
+    for (const chat of chats) {
+      const phone = normalizePhone(chat.pn);
+      const fresh = chat.msgs.filter((m) => m.t >= sinceS);
+      const newTexts = fresh.map((m) => m.body).filter(Boolean);
+      const r = route({ phone, saved: chat.saved, newTexts, leadPhones: new Set(leadByPhone.keys()), candidateStatus: candStatus.get(phone) });
+      counts[r]++;
+      if (r === 'skip') continue;
+      try {
+        const verdict = await askModel(r === 'lead' ? 'lead' : 'check', chat, sinceS);
+        counts.model++;
+        if (!verdict.relevant || !verdict.summary) { counts.notRelevant++; continue; }
+        const lastIso = new Date(fresh[fresh.length - 1].t * 1000).toISOString();
+        // Dry run shows only what WOULD reach the dashboard (the summary line), never messages.
+        if (DRY) { counts.written++; console.log(`  ${r} ${phone.slice(0, 3)}…${phone.slice(-2)} ${verdict.kind || ''} | ${verdict.summary}${verdict.source ? ' | מקור: ' + verdict.source : ''}`); continue; }
+        if (r === 'lead') await recordOnLead(sb, leadByPhone.get(phone), chat, verdict, lastIso, phone);
+        else await recordCandidate(sb, phone, chat, verdict, lastIso);
+        counts.written++;
+      } catch (err) {
+        counts.errors++;
+        log(`⚠️ chat failed: ${String(err.message).slice(0, 160)}`);
+      }
+    }
+
+    // Move the checkpoint only when every chat went through; reruns are free
+    // (the timeline ref and the candidate's phone are unique).
+    if (!DRY && !counts.errors) writeState({ ...state, since: snapshotMs, lastOk: new Date().toISOString() });
+    log(`${DRY ? '[dry-run] ' : ''}since=${new Date(sinceMs).toISOString()} ${JSON.stringify(counts)}`);
+  } catch (err) {
+    log(`❌ ${err.message}`);
+    if (/auth failure|QR/i.test(err.message) && Date.now() - (state.alertedAt || 0) > ALERT_EVERY_MS) {
+      await sendAlert('⚠️ סריקת הצ׳אטים הפרטיים (052) לא מצליחה להתחבר לווטסאפ — צריך לסרוק QR מחדש (חבר-ווצאפ.bat).');
+      writeState({ ...readState(), alertedAt: Date.now() });
+    }
+    process.exitCode = 1;
+  } finally {
+    if (client) { try { await client.destroy(); } catch {} }
+    clearTimeout(killer);
+    try { fs.unlinkSync(LOCK_FILE); } catch {}
+  }
+}
+
+if (require.main === module) main().then(() => process.exit(process.exitCode || 0));
+
+module.exports = { promptFor };

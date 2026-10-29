@@ -8,6 +8,8 @@
  *   phone already a lead   -> one summary line on its timeline (whatsapp_amir)
  *   real-estate inquiry    -> "לידים חדשים לאישור" (crm_lead_candidates), Amir approves
  *   anything else          -> nothing leaves the PC
+ *   Amir's voice notes in his group "תזכורות" -> transcribed here, then a lead
+ *                            update like the dashboard's text box (src/voice-notes.js)
  *
  * Never sends, never marks read, never changes presence: it only reads WA
  * Web's store. Shares the WhatsApp session with daily-report.js, so it takes
@@ -29,17 +31,23 @@ const { createClient } = require('@supabase/supabase-js');
 const { connect } = require('./whatsapp-client');
 const { sendAlert } = require('./alert');
 const { normalizePhone, route, transcript, parseVerdict, firstLookFloor, pruneSeen } = require('./private-chat-rules');
+const voice = require('./voice-notes');
 
 const ROOT        = path.join(__dirname, '..');
 const LOCK_FILE   = path.join(ROOT, 'data', 'running.lock');
 const STATE_FILE  = path.join(ROOT, 'data', 'private-scan.json');
 const LOG_FILE    = path.join(ROOT, 'logs', 'private-scan.log');
+const VOICE_DIR   = path.join(ROOT, 'data', 'voice');
 const LOCK_TIMEOUT_MS = 30 * 60 * 1000;
 const FIRST_RUN_DAYS  = 3;           // Amir: 3 days on the first run
 const MAX_RUN_MS      = 10 * 60_000; // never hold the session longer than this
+const VOICE_RUN_MS    = 25 * 60_000; // after the session closes: local transcription can be slow
+const VOICE_FIRST_DAYS = 2;          // first run: voice notes from the last 2 days
 const ALERT_EVERY_MS  = 12 * 3_600_000;
 const MODEL = 'claude-haiku-4-5';
 const DRY = process.argv.includes('--dry-run');
+// Voice notes are off until the media download works (WA Web 2026-10; spec sec 11): VOICE_NOTES=on in .env.
+const VOICE_ON = process.env.VOICE_NOTES === 'on';
 
 // ── small helpers ─────────────────────────────────────────────────────────────
 
@@ -176,19 +184,35 @@ async function main() {
   if (locked()) { log('skip: WhatsApp session busy (daily report running)'); return; }
   ensureDir(LOCK_FILE);
   fs.writeFileSync(LOCK_FILE, `private-scan ${new Date().toISOString()}`);
-  const killer = setTimeout(() => { log('⚠️ run exceeded 10 min — stopping'); try { fs.unlinkSync(LOCK_FILE); } catch {} process.exit(1); }, MAX_RUN_MS);
+  const stop = (why) => () => { log(`⚠️ ${why} — stopping`); try { fs.unlinkSync(LOCK_FILE); } catch {} process.exit(1); };
+  let killer = setTimeout(stop('run exceeded 10 min'), MAX_RUN_MS);
 
   const state = readState();
   const nowS = Date.now() / 1000;
   const floorS = firstLookFloor(state, nowS, FIRST_RUN_DAYS);
   const seen = state.seen || {};
   const counts = { chats: 0, lead: 0, candidate: 0, check: 0, skip: 0, model: 0, written: 0, notRelevant: 0, errors: 0 };
+  let voiceSince = typeof state.voiceSince === 'number' ? state.voiceSince : nowS - VOICE_FIRST_DAYS * 86400;
+  let notes = [];
   let client;
   try {
     client = await connect();
     const chats = await readPrivateChats(client, seen, floorS);
+    if (VOICE_ON) try {
+      const v = await voice.findVoiceNotes(client, voiceSince);
+      if (!v.found) log(`⚠️ voice: no group named "${voice.GROUP_NAME}"`);
+      else if (DRY) console.log('  voice group:', JSON.stringify(v.stats));
+      const d = await voice.downloadNotes(client, v.notes, VOICE_DIR);
+      notes = d.ok;
+      if (d.error) log(`⚠️ voice download (${v.notes.length - d.ok.length} waiting): ${d.error}`);
+    } catch (err) {
+      log(`⚠️ voice: ${String(err.message).slice(0, 160)}`);
+    }
     try { await client.destroy(); } catch {}
     client = null;
+    // The WhatsApp session is closed: the slow local part gets its own limit.
+    clearTimeout(killer);
+    killer = setTimeout(stop('run exceeded the voice-note limit'), VOICE_RUN_MS);
     counts.chats = chats.length;
 
     const sb = db();
@@ -225,9 +249,31 @@ async function main() {
       }
     }
 
+    // Voice notes, oldest first. One that fails stops the line, so the cursor never
+    // skips it; it is retried next hour. The audio is deleted once it's handled.
+    const vcounts = { notes: notes.length, ok: 0, noLead: 0, errors: 0 };
+    if (notes.length) {
+      try {
+        const texts = voice.transcribe(notes.map((n) => n.file));
+        for (const n of notes) {
+          const tr = texts.get(n.file);
+          if (!tr || tr.error) { vcounts.errors++; log(`⚠️ voice transcribe: ${tr ? tr.error : 'missing'}`); break; }
+          const r = tr.text ? voice.applyUpdate(tr.text, { dry: DRY }) : { status: 'empty' };
+          if (DRY) console.log(`  voice ${new Date(n.t * 1000).toISOString()} (${tr.seconds}s) | ${tr.text}
+    -> ${JSON.stringify(r.parsed || r)}`);
+          else log(`voice ${new Date(n.t * 1000).toISOString()} ${tr.seconds}s -> ${r.status}${r.lead ? ` ${r.lead.name || ''} ${r.lead.phone || ''}` : ''}${r.created ? ' (new lead)' : ''}${r.task ? ` | task: ${r.task.title} @ ${r.task.due_at}` : ''}`);
+          if (r.status === 'ok') vcounts.ok++; else vcounts.noLead++;
+          if (!DRY) { voiceSince = n.t; try { fs.unlinkSync(n.file); } catch {} }
+        }
+      } catch (err) {
+        vcounts.errors++;
+        log(`⚠️ voice: ${String(err.message).slice(0, 160)}`);
+      }
+    }
+
     // A chat that failed keeps its old cursor and is retried next hour; the rest move on.
-    if (!DRY) writeState({ ...state, since: undefined, start: typeof state.start === 'number' ? state.start : floorS, seen: pruneSeen(seen, nowS), lastOk: new Date().toISOString() });
-    log(`${DRY ? '[dry-run] ' : ''}floor=${new Date(floorS * 1000).toISOString()} ${JSON.stringify(counts)}`);
+    if (!DRY) writeState({ ...state, since: undefined, start: typeof state.start === 'number' ? state.start : floorS, seen: pruneSeen(seen, nowS), voiceSince, lastOk: new Date().toISOString() });
+    log(`${DRY ? '[dry-run] ' : ''}floor=${new Date(floorS * 1000).toISOString()} ${JSON.stringify(counts)} voice=${JSON.stringify(vcounts)}`);
   } catch (err) {
     log(`❌ ${err.message}`);
     if (/auth failure|QR/i.test(err.message) && Date.now() - (state.alertedAt || 0) > ALERT_EVERY_MS) {

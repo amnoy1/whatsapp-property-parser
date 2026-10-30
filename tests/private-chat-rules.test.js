@@ -2,7 +2,7 @@
 
 const { test } = require('node:test');
 const assert   = require('node:assert/strict');
-const { normalizePhone, hasRealEstateWords, route, transcript, parseVerdict, firstLookFloor, pruneSeen } = require('../src/private-chat-rules');
+const { normalizePhone, hasRealEstateWords, streetKeys, strongSignal, route, transcript, parseVerdict, firstLookFloor, pruneSeen } = require('../src/private-chat-rules');
 
 const base = { phone: '0541234567', saved: true, newTexts: ['מה נשמע?'], leadPhones: new Set(), candidateStatus: undefined };
 
@@ -42,6 +42,39 @@ test("Nir's own ManyChat number (054) is never a lead, whatever it says", () => 
 
 test('no new text (only a voice note or a call) -> nothing to read', () => {
   assert.equal(route({ ...base, saved: false, newTexts: [] }), 'skip');
+});
+
+const keys = streetKeys(['הבריגדה היהודית 18', 'נלקין 12', 'ש"י עגנון 16', 'הרב קטרוני 10', '', null]);
+
+test('street keys: no house number, no leading ה, first word as a short form', () => {
+  assert.deepEqual(keys.map((k) => k.key), ['בריגדה היהודית', 'בריגדה', 'נלקין', 'ש"י עגנון', 'רב קטרוני']);
+});
+
+test('ניר קונה הבריגדה (2026-10-30): a saved buyer with no real-estate word in the message still reaches Amir', () => {
+  const signal = strongSignal({ name: 'ניר קונה הבריגדה היהודית', texts: ['בודק עם השוכרים ומעדכן.'], keys });
+  assert.equal(signal.property, 'הבריגדה היהודית');
+  assert.equal(route({ ...base, newTexts: ['בודק עם השוכרים ומעדכן.'], signal }), 'check');
+});
+
+test('with a signal, an existing lead is still updated, never re-queued as a new one', () => {
+  const signal = strongSignal({ name: 'ניר קונה הבריגדה היהודית', texts: ['בודק עם השוכרים'], keys });
+  assert.equal(route({ ...base, leadPhones: new Set(['0541234567']), newTexts: ['בודק עם השוכרים'], signal }), 'lead');
+});
+
+test('a Mango street in the message, with a Hebrew prefix, is a signal', () => {
+  assert.equal(strongSignal({ name: 'יוסי', texts: ['מתי אפשר בבריגדה?'], keys }).property, 'הבריגדה היהודית');
+  assert.equal(strongSignal({ name: 'יוסי', texts: ['ברחוב נלקין עדיין פנוי?'], keys }).property, 'נלקין');
+});
+
+test('arranging a visit is a signal; a contact saved as a buyer is a signal', () => {
+  assert.equal(strongSignal({ name: 'דנה', texts: ['אפשר לבוא לראות מחר ב-5?'], keys }).reason, 'תיאום ביקור');
+  assert.equal(strongSignal({ name: 'אלכס קונה הר צין', texts: ['תודה'], keys }).reason, 'שם איש הקשר');
+});
+
+test('a friend talking about nothing in particular is no signal and stays on the PC', () => {
+  const signal = strongSignal({ name: 'גיא', texts: ['מה נשמע? נדבר בערב'], keys });
+  assert.equal(signal, null);
+  assert.equal(route({ ...base, signal }), 'skip');
 });
 
 test('"אני בבית" alone does not wake the model', () => {

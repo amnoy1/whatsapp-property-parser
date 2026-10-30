@@ -32,6 +32,39 @@ function hasRealEstateWords(texts) {
   return REAL_ESTATE_WORDS.some((w) => t.includes(w));
 }
 
+// Amir 2026-10-30 (ניר קונה הבריגדה: "בודק עם השוכרים ומעדכן" was skipped):
+// a Mango property's street, a visit being arranged, or a contact Amir saved
+// as a buyer/seller is ALWAYS queued for his ✓/✗, whatever the model thinks.
+const VISIT_WORDS = [
+  'ביקור', 'לבקר בנכס', 'לבקר בדירה', 'לבוא לראות', 'להגיע לראות', 'לראות את הדירה', 'לראות את הנכס', 'לראות את הבית',
+  'סיור בנכס', 'לתאם', 'תיאום', 'נתאם', 'שוכרים', 'השוכר', 'הדיירים',
+];
+
+/** Street names of Mango's properties ("הבריגדה היהודית 18") -> match keys: no number, no leading ה, plus a first word of 4+ letters. */
+function streetKeys(streets) {
+  const keys = [];
+  for (const s of streets || []) {
+    const full = String(s || '').replace(/\d+\s*[א-ת]?\s*$/, '').replace(/״/g, '"').trim();
+    if (full.length < 3) continue;
+    const bare = full.replace(/^ה/, '');
+    keys.push({ key: bare, street: full });
+    const first = bare.split(/\s+/)[0];
+    if (first !== bare && first.length >= 4) keys.push({ key: first, street: full });
+  }
+  return keys;
+}
+
+/** A reason this chat/call must reach Amir, or null. -> { reason, property } */
+function strongSignal({ name, texts, keys }) {
+  const t = (texts || []).join('\n').replace(/״/g, '"');
+  const n = String(name || '').replace(/״/g, '"');
+  const hit = (keys || []).find((k) => t.includes(k.key) || n.includes(k.key));
+  if (hit) return { reason: `נכס: ${hit.street}`, property: hit.street };
+  if (VISIT_WORDS.some((w) => t.includes(w))) return { reason: 'תיאום ביקור', property: null };
+  if (n && REAL_ESTATE_WORDS.some((w) => n.includes(w))) return { reason: 'שם איש הקשר', property: null };
+  return null;
+}
+
 /**
  * What to do with one chat that has new messages.
  * @returns {'lead'|'skip'|'check'|'candidate'} lead = summarize onto the lead;
@@ -41,14 +74,14 @@ function hasRealEstateWords(texts) {
 // Mango's own numbers: Nir / ManyChat (054) talks to 052 all day and is never a lead.
 const OWN_NUMBERS = new Set(['0545370056']);
 
-function route({ phone, saved, newTexts, leadPhones, candidateStatus }) {
+function route({ phone, saved, newTexts, leadPhones, candidateStatus, signal }) {
   if (!phone || OWN_NUMBERS.has(phone)) return 'skip';
   if (!newTexts.length) return 'skip';
   if (leadPhones.has(phone)) return 'lead';
   if (candidateStatus === 'dismissed' || candidateStatus === 'approved') return 'skip';
   if (candidateStatus === 'pending') return 'candidate';
   if (!saved) return 'check';
-  return hasRealEstateWords(newTexts) ? 'check' : 'skip';
+  return signal || hasRealEstateWords(newTexts) ? 'check' : 'skip';
 }
 
 const TYPE_LABEL = { image: '[תמונה]', video: '[וידאו]', ptt: '[הודעה קולית]', audio: '[הקלטה]', document: '[מסמך]', sticker: '[מדבקה]', location: '[מיקום]', vcard: '[איש קשר]', album: '[תמונות]' };
@@ -104,4 +137,4 @@ function pruneSeen(seen, nowS) {
   return Object.fromEntries(Object.entries(seen).filter(([, t]) => t >= cut));
 }
 
-module.exports = { normalizePhone, hasRealEstateWords, route, transcript, parseVerdict, firstLookFloor, pruneSeen, REAL_ESTATE_WORDS };
+module.exports = { normalizePhone, hasRealEstateWords, streetKeys, strongSignal, route, transcript, parseVerdict, firstLookFloor, pruneSeen, REAL_ESTATE_WORDS, VISIT_WORDS };

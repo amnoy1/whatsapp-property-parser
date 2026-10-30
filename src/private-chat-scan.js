@@ -30,7 +30,7 @@ const Anthropic = require('@anthropic-ai/sdk');
 const { createClient } = require('@supabase/supabase-js');
 const { connect } = require('./whatsapp-client');
 const { sendAlert } = require('./alert');
-const { normalizePhone, route, transcript, parseVerdict, firstLookFloor, pruneSeen } = require('./private-chat-rules');
+const { normalizePhone, streetKeys, strongSignal, route, transcript, parseVerdict, firstLookFloor, pruneSeen } = require('./private-chat-rules');
 const voice = require('./voice-notes');
 
 const ROOT        = path.join(__dirname, '..');
@@ -123,7 +123,7 @@ function promptFor(mode, context, fresh) {
 
 זה ליד קיים של אמיר. כתוב שורת סיכום אחת, עד 20 מילים, של מה שחדש בהודעות החדשות: מה הליד אמר או ביקש, מה סוכם, מה הצעד הבא.
 אם בהודעות החדשות אין שום דבר מהותי (רק תודה, אישור, אימוג'י, ברכה) - relevant=false.
-החזר: {"relevant": true/false, "summary": "..."}`;
+החזר: {"relevant": true/false, "summary": "..."} (summary תמיד, גם כש-relevant=false)`;
   }
   return `${convo}
 
@@ -132,7 +132,7 @@ function promptFor(mode, context, fresh) {
 החזר: {"relevant": true/false, "kind": "buyer"|"seller"|"broker"|"other", "source": "...", "property": "...", "summary": "..."}
 - source: רק אם נאמר במפורש איך הגיע (למשל "ראיתי ביד2", "ראיתי את השלט", "X הפנה אותי"). אחרת null. אל תנחש.
 - property: הרחוב או הנכס שהוזכר, אחרת null.
-- summary: שורה אחת, עד 20 מילים: מי זה ומה הוא רוצה.`;
+- summary: שורה אחת, עד 20 מילים: מי זה ומה הוא רוצה. תמיד, גם כש-relevant=false.`;
 }
 
 async function askModel(mode, chat) {
@@ -191,7 +191,7 @@ async function main() {
   const nowS = Date.now() / 1000;
   const floorS = firstLookFloor(state, nowS, FIRST_RUN_DAYS);
   const seen = state.seen || {};
-  const counts = { chats: 0, lead: 0, candidate: 0, check: 0, skip: 0, model: 0, written: 0, notRelevant: 0, errors: 0 };
+  const counts = { chats: 0, lead: 0, candidate: 0, check: 0, skip: 0, model: 0, written: 0, notRelevant: 0, forced: 0, errors: 0 };
   let voiceSince = typeof state.voiceSince === 'number' ? state.voiceSince : nowS - VOICE_FIRST_DAYS * 86400;
   let notes = [];
   let client;
@@ -223,19 +223,30 @@ async function main() {
     const cands = phones.length ? await must(sb.from('crm_lead_candidates').select('phone,status').in('phone', phones)).catch((e) => { log(`⚠️ candidates: ${e.message}`); return []; }) : [];
     const leadByPhone = new Map(leads.map((l) => [l.phone, l]));
     const candStatus = new Map(cands.map((c) => [c.phone, c.status]));
+    // Mango's own properties: a chat naming one of these streets always reaches Amir.
+    const keys = chats.length ? streetKeys((await must(sb.from('properties').select('street')).catch(() => [])).map((p) => p.street)) : [];
 
     for (const chat of chats) {
       const phone = normalizePhone(chat.pn);
       const fresh = chat.msgs.filter((m) => m.t > chat.cursor);
       const lastT = fresh.length ? fresh[fresh.length - 1].t : chat.cursor;
       const newTexts = fresh.map((m) => m.body).filter(Boolean);
-      const r = route({ phone, saved: chat.saved, newTexts, leadPhones: new Set(leadByPhone.keys()), candidateStatus: candStatus.get(phone) });
+      const signal = strongSignal({ name: chat.saved ? chat.name : null, texts: newTexts, keys });
+      const r = route({ phone, saved: chat.saved, newTexts, leadPhones: new Set(leadByPhone.keys()), candidateStatus: candStatus.get(phone), signal });
       counts[r]++;
       if (r === 'skip') { seen[chat.id] = lastT; continue; }
       try {
         const verdict = await askModel(r === 'lead' ? 'lead' : 'check', chat);
         counts.model++;
-        if (!verdict.relevant || !verdict.summary) { counts.notRelevant++; seen[chat.id] = lastT; continue; }
+        // A strong signal is queued for Amir's ✓/✗ even when the model says "not real estate";
+        // on an existing lead (found by phone first) a street / visit is an update, never a new lead.
+        const strong = r === 'lead' ? signal && signal.reason !== 'שם איש הקשר' : signal;
+        const forced = strong && (!verdict.relevant || !verdict.summary);
+        if (forced) {
+          counts.forced++;
+          verdict.summary = verdict.summary || `${chat.name || 'איש קשר'} (${signal.reason})`;
+        } else if (!verdict.relevant || !verdict.summary) { counts.notRelevant++; seen[chat.id] = lastT; continue; }
+        if (r !== 'lead' && signal && signal.property && !verdict.property) verdict.property = signal.property;
         const lastIso = new Date(fresh[fresh.length - 1].t * 1000).toISOString();
         // Dry run shows only what WOULD reach the dashboard (the summary line), never messages.
         if (DRY) { counts.written++; console.log(`  ${r} ${phone.slice(0, 3)}…${phone.slice(-2)} ${verdict.kind || ''} | ${verdict.summary}${verdict.source ? ' | מקור: ' + verdict.source : ''}`); continue; }

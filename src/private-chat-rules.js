@@ -87,6 +87,16 @@ function route({ phone, saved, newTexts, leadPhones, candidateStatus, signal }) 
   return signal || hasRealEstateWords(newTexts) ? 'check' : 'skip';
 }
 
+// Amir 2026-10-30 (Naor = "נאור קונה נלקין"): the name he saved in his phone is
+// the lead's name. A name he typed in the dashboard (name_locked) always wins.
+/** The new name for a lead, or null when nothing should change. */
+function nameUpdate(lead, savedName) {
+  const saved = String(savedName || '').trim();
+  if (!lead || lead.name_locked || saved.length < 2) return null;
+  if (/^[\d\s+\-()]+$/.test(saved)) return null; // a number, not a name
+  return saved === String(lead.name || '').trim() ? null : saved;
+}
+
 const TYPE_LABEL = { image: '[תמונה]', video: '[וידאו]', ptt: '[הודעה קולית]', audio: '[הקלטה]', document: '[מסמך]', sticker: '[מדבקה]', location: '[מיקום]', vcard: '[איש קשר]', album: '[תמונות]' };
 
 /** The text the model sees: the last messages, newest last, capped in size. */
@@ -140,4 +150,4 @@ function pruneSeen(seen, nowS) {
   return Object.fromEntries(Object.entries(seen).filter(([, t]) => t >= cut));
 }
 
-module.exports = { normalizePhone, hasRealEstateWords, streetKeys, strongSignal, route, transcript, parseVerdict, firstLookFloor, pruneSeen, REAL_ESTATE_WORDS, VISIT_WORDS };
+module.exports = { normalizePhone, hasRealEstateWords, streetKeys, strongSignal, nameUpdate, route, transcript, parseVerdict, firstLookFloor, pruneSeen, REAL_ESTATE_WORDS, VISIT_WORDS };

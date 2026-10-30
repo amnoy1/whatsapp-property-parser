@@ -2,7 +2,7 @@
 
 const { test } = require('node:test');
 const assert   = require('node:assert/strict');
-const { normalizePhone, hasRealEstateWords, streetKeys, strongSignal, route, transcript, parseVerdict, firstLookFloor, pruneSeen } = require('../src/private-chat-rules');
+const { normalizePhone, hasRealEstateWords, streetKeys, strongSignal, nameUpdate, route, transcript, parseVerdict, firstLookFloor, pruneSeen } = require('../src/private-chat-rules');
 
 const base = { phone: '0541234567', saved: true, newTexts: ['מה נשמע?'], leadPhones: new Set(), candidateStatus: undefined };
 
@@ -77,6 +77,15 @@ test('a friend talking about nothing in particular is no signal and stays on the
   const signal = strongSignal({ name: 'גיא', texts: ['מה נשמע? נדבר בערב'], keys });
   assert.equal(signal, null);
   assert.equal(route({ ...base, signal }), 'skip');
+});
+
+test('names: the phone contact name replaces the WhatsApp profile name; a dashboard-typed name is never touched', () => {
+  assert.equal(nameUpdate({ name: 'Naor' }, 'נאור קונה נלקין'), 'נאור קונה נלקין');
+  assert.equal(nameUpdate({ name: null }, 'רבקה'), 'רבקה');
+  assert.equal(nameUpdate({ name: 'Naor', name_locked: true }, 'נאור קונה נלקין'), null);
+  assert.equal(nameUpdate({ name: 'נאור קונה נלקין' }, 'נאור קונה נלקין '), null);
+  assert.equal(nameUpdate({ name: 'Naor' }, '+972 54-123-4567'), null);
+  assert.equal(nameUpdate({ name: 'Naor' }, ''), null);
 });
 
 test('"אני בבית" alone does not wake the model', () => {

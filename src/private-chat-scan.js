@@ -30,7 +30,7 @@ const Anthropic = require('@anthropic-ai/sdk');
 const { createClient } = require('@supabase/supabase-js');
 const { connect } = require('./whatsapp-client');
 const { sendAlert } = require('./alert');
-const { normalizePhone, streetKeys, strongSignal, route, transcript, parseVerdict, firstLookFloor, pruneSeen } = require('./private-chat-rules');
+const { normalizePhone, streetKeys, strongSignal, nameUpdate, route, transcript, parseVerdict, firstLookFloor, pruneSeen } = require('./private-chat-rules');
 const voice = require('./voice-notes');
 
 const ROOT        = path.join(__dirname, '..');
@@ -121,7 +121,8 @@ function promptFor(mode, context, fresh) {
   if (mode === 'lead') {
     return `${convo}
 
-זה ליד קיים של אמיר. כתוב שורת סיכום אחת, עד 20 מילים, של מה שחדש בהודעות החדשות: מה הליד אמר או ביקש, מה סוכם, מה הצעד הבא.
+זה ליד קיים של אמיר. כתוב שורת סיכום אחת, עד 25 מילים, של מה שחדש בהודעות החדשות: מה הליד אמר או ביקש, מה סוכם, מה הצעד הבא.
+אם הליד אמר שהוא לא מעוניין, לא רלוונטי לו כרגע, קנה במקום אחר, ירד מהנכס או ביטל/דחה ביקור - פתח בזה, קרוב למילים שלו, וכתוב גם את הסיבה אם נאמרה (למשל: "כרגע לא רלוונטי לה לקנות דירה, ביטלה את הביקור"). אסור להשמיט את זה.
 אם בהודעות החדשות אין שום דבר מהותי (רק תודה, אישור, אימוג'י, ברכה) - relevant=false.
 החזר: {"relevant": true/false, "summary": "..."} (summary תמיד, גם כש-relevant=false)`;
   }
@@ -191,7 +192,7 @@ async function main() {
   const nowS = Date.now() / 1000;
   const floorS = firstLookFloor(state, nowS, FIRST_RUN_DAYS);
   const seen = state.seen || {};
-  const counts = { chats: 0, lead: 0, candidate: 0, check: 0, skip: 0, model: 0, written: 0, notRelevant: 0, forced: 0, errors: 0 };
+  const counts = { chats: 0, lead: 0, candidate: 0, check: 0, skip: 0, model: 0, written: 0, notRelevant: 0, forced: 0, renamed: 0, errors: 0 };
   let voiceSince = typeof state.voiceSince === 'number' ? state.voiceSince : nowS - VOICE_FIRST_DAYS * 86400;
   let notes = [];
   let client;
@@ -217,7 +218,7 @@ async function main() {
 
     const sb = db();
     const phones = [...new Set(chats.map((c) => normalizePhone(c.pn)).filter(Boolean))];
-    const leads = phones.length ? await must(sb.from('crm_leads').select('id,phone,last_interaction_at').in('phone', phones).is('archived_at', null)) : [];
+    const leads = phones.length ? await must(sb.from('crm_leads').select('id,phone,name,name_locked,last_interaction_at').in('phone', phones).is('archived_at', null)) : [];
     // Before sql/016 runs the table is missing: read it as empty; the writes then
     // fail, so the checkpoint stays and the next run retries the same chats.
     const cands = phones.length ? await must(sb.from('crm_lead_candidates').select('phone,status').in('phone', phones)).catch((e) => { log(`⚠️ candidates: ${e.message}`); return []; }) : [];
@@ -231,6 +232,12 @@ async function main() {
       const fresh = chat.msgs.filter((m) => m.t > chat.cursor);
       const lastT = fresh.length ? fresh[fresh.length - 1].t : chat.cursor;
       const newTexts = fresh.map((m) => m.body).filter(Boolean);
+      // The lead's name = the name Amir saved in his phone (never over a dashboard-typed one). No model.
+      const rename = chat.saved ? nameUpdate(leadByPhone.get(phone), chat.name) : null;
+      if (rename && !DRY) {
+        await must(sb.from('crm_leads').update({ name: rename }).eq('id', leadByPhone.get(phone).id).eq('name_locked', false)).catch((e) => log(`⚠️ rename: ${e.message}`));
+        counts.renamed++;
+      } else if (rename) counts.renamed++;
       const signal = strongSignal({ name: chat.saved ? chat.name : null, texts: newTexts, keys });
       const r = route({ phone, saved: chat.saved, newTexts, leadPhones: new Set(leadByPhone.keys()), candidateStatus: candStatus.get(phone), signal });
       counts[r]++;

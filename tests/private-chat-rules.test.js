@@ -72,6 +72,8 @@ test('arranging a visit is a signal; a contact saved as a buyer is a signal', ()
 });
 
 test('a friend talking about nothing in particular is no signal and stays on the PC', () => {
+  assert.equal(strongSignal({ name: 'שלומי', texts: ['יש לדיינר הזה ביקורות מעולות'], keys }), null);
+  assert.equal(strongSignal({ name: 'שלומי', texts: ['מתי נוח לך ביקור?'], keys }).reason, 'תיאום ביקור');
   const signal = strongSignal({ name: 'גיא', texts: ['מה נשמע? נדבר בערב'], keys });
   assert.equal(signal, null);
   assert.equal(route({ ...base, signal }), 'skip');

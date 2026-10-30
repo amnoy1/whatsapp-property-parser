@@ -249,7 +249,7 @@ async function main() {
         if (r !== 'lead' && signal && signal.property && !verdict.property) verdict.property = signal.property;
         const lastIso = new Date(fresh[fresh.length - 1].t * 1000).toISOString();
         // Dry run shows only what WOULD reach the dashboard (the summary line), never messages.
-        if (DRY) { counts.written++; console.log(`  ${r} ${phone.slice(0, 3)}…${phone.slice(-2)} ${verdict.kind || ''} | ${verdict.summary}${verdict.source ? ' | מקור: ' + verdict.source : ''}`); continue; }
+        if (DRY) { counts.written++; console.log(`  ${r} ${phone.slice(0, 3)}…${phone.slice(-2)} ${verdict.kind || ''} | ${verdict.summary}${verdict.source ? ' | מקור: ' + verdict.source : ''}${signal ? ' | סיבה: ' + signal.reason + (signal.match ? ` ("${signal.match}")` : '') : ''}`); continue; }
         if (r === 'lead') await recordOnLead(sb, leadByPhone.get(phone), chat, verdict, lastIso, phone);
         else await recordCandidate(sb, phone, chat, verdict, lastIso);
         counts.written++;

@@ -35,9 +35,11 @@ function hasRealEstateWords(texts) {
 // Amir 2026-10-30 (ניר קונה הבריגדה: "בודק עם השוכרים ומעדכן" was skipped):
 // a Mango property's street, a visit being arranged, or a contact Amir saved
 // as a buyer/seller is ALWAYS queued for his ✓/✗, whatever the model thinks.
+// "ביקור" as a whole word only: "ביקורות" (restaurant reviews) woke it (שלומי, 2026-10-30).
+const VISIT_RE = /ביקור(?![א-ת])/;
 const VISIT_WORDS = [
-  'ביקור', 'לבקר בנכס', 'לבקר בדירה', 'לבוא לראות', 'להגיע לראות', 'לראות את הדירה', 'לראות את הנכס', 'לראות את הבית',
-  'סיור בנכס', 'לתאם', 'תיאום', 'נתאם', 'שוכרים', 'השוכר', 'הדיירים',
+  'לבקר בנכס', 'לבקר בדירה', 'לבוא לראות', 'להגיע לראות', 'לראות את הדירה', 'לראות את הנכס', 'לראות את הבית',
+  'סיור בנכס', 'לתאם ביקור', 'תיאום ביקור', 'נתאם ביקור', 'לתאם לראות', 'שוכרים', 'השוכר',
 ];
 
 /** Street names of Mango's properties ("הבריגדה היהודית 18") -> match keys: no number, no leading ה, plus a first word of 4+ letters. */
@@ -60,7 +62,8 @@ function strongSignal({ name, texts, keys }) {
   const n = String(name || '').replace(/״/g, '"');
   const hit = (keys || []).find((k) => t.includes(k.key) || n.includes(k.key));
   if (hit) return { reason: `נכס: ${hit.street}`, property: hit.street };
-  if (VISIT_WORDS.some((w) => t.includes(w))) return { reason: 'תיאום ביקור', property: null };
+  const visit = VISIT_RE.test(t) ? 'ביקור' : VISIT_WORDS.find((w) => t.includes(w));
+  if (visit) return { reason: 'תיאום ביקור', property: null, match: visit };
   if (n && REAL_ESTATE_WORDS.some((w) => n.includes(w))) return { reason: 'שם איש הקשר', property: null };
   return null;
 }

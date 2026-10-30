@@ -114,6 +114,24 @@ function transcript(msgs, name, { maxMsgs = 30, maxChars = 6000 } = {}) {
 }
 
 const KINDS = ['buyer', 'seller', 'broker', 'other'];
+const STEP_TYPES = ['call', 'schedule_visit', 'send_alternative', 'answer_question', 'other'];
+
+// Amir 2026-10-30: a chat/call on a lead moves its next step (nir-buyers-agent
+// lib/scan-steps.js applies it). Model output -> {kind:'step'|'not_relevant', ...} or null.
+function parseNext(n) {
+  if (!n || typeof n !== 'object') return null;
+  if (n.kind === 'not_relevant') return { kind: 'not_relevant' };
+  if (n.kind !== 'step') return null;
+  const date = /^\d{4}-\d{2}-\d{2}$/.test(String(n.due_date || '')) ? n.due_date : null;
+  const time = date && /^\d{1,2}:\d{2}$/.test(String(n.due_time || '')) ? n.due_time : null;
+  return {
+    kind: 'step',
+    type: STEP_TYPES.includes(n.type) ? n.type : 'other',
+    title: typeof n.title === 'string' && n.title.trim() ? n.title.trim().slice(0, 80) : null,
+    due_date: date,
+    due_time: time,
+  };
+}
 
 /** Model output -> a safe object. Anything malformed means "not real estate". */
 function parseVerdict(text) {
@@ -126,9 +144,10 @@ function parseVerdict(text) {
       source: s(j.source, 80),
       property: s(j.property, 80),
       summary: s(j.summary, 200),
+      next: parseNext(j.next),
     };
   } catch {
-    return { relevant: false, kind: 'other', source: null, property: null, summary: null };
+    return { relevant: false, kind: 'other', source: null, property: null, summary: null, next: null };
   }
 }
 
@@ -150,4 +169,4 @@ function pruneSeen(seen, nowS) {
   return Object.fromEntries(Object.entries(seen).filter(([, t]) => t >= cut));
 }
 
-module.exports = { normalizePhone, hasRealEstateWords, streetKeys, strongSignal, nameUpdate, route, transcript, parseVerdict, firstLookFloor, pruneSeen, REAL_ESTATE_WORDS, VISIT_WORDS };
+module.exports = { normalizePhone, hasRealEstateWords, streetKeys, strongSignal, nameUpdate, route, transcript, parseVerdict, parseNext, firstLookFloor, pruneSeen, REAL_ESTATE_WORDS, VISIT_WORDS };

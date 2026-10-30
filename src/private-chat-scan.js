@@ -116,6 +116,12 @@ const anthropic = new Anthropic();
 
 const SYSTEM = `אתה עוזר של אמיר, מתווך נדל"ן (מנגו נדל"ן, כפר סבא והסביבה). אתה קורא שיחת ווטסאפ פרטית של אמיר ומחזיר JSON תקין בלבד, בלי טקסט נוסף.`;
 
+/** "יום שישי 2026-10-30": the model turns "ביום ראשון" into a date. */
+function todayIsrael(now = new Date()) {
+  const day = now.toLocaleDateString('he-IL', { timeZone: 'Asia/Jerusalem', weekday: 'long' });
+  return `${day} ${now.toLocaleDateString('en-CA', { timeZone: 'Asia/Jerusalem' })}`;
+}
+
 function promptFor(mode, context, fresh) {
   const convo = (context ? `הודעות קודמות (להקשר בלבד):\n${context}\n\n` : '') + `ההודעות החדשות:\n${fresh}`;
   if (mode === 'lead') {
@@ -124,7 +130,11 @@ function promptFor(mode, context, fresh) {
 זה ליד קיים של אמיר. כתוב שורת סיכום אחת, עד 25 מילים, של מה שחדש בהודעות החדשות: מה הליד אמר או ביקש, מה סוכם, מה הצעד הבא.
 אם הליד אמר שהוא לא מעוניין, לא רלוונטי לו כרגע, קנה במקום אחר, ירד מהנכס או ביטל/דחה ביקור - פתח בזה, קרוב למילים שלו, וכתוב גם את הסיבה אם נאמרה (למשל: "כרגע לא רלוונטי לה לקנות דירה, ביטלה את הביקור"). אסור להשמיט את זה.
 אם בהודעות החדשות אין שום דבר מהותי (רק תודה, אישור, אימוג'י, ברכה) - relevant=false.
-החזר: {"relevant": true/false, "summary": "..."} (summary תמיד, גם כש-relevant=false)`;
+next = הצעד הבא של אמיר מול הליד, לפי ההודעות החדשות בלבד:
+- {"kind": "not_relevant"} אם הליד הפסיק לחפש, לא מעוניין בכלל, לא רלוונטי לו כרגע או קנה במקום אחר. ירידה מנכס אחד כשהוא עדיין מחפש = step, לא not_relevant.
+- {"kind": "step", "type": "call"|"schedule_visit"|"send_alternative"|"answer_question"|"other", "title": "עד 6 מילים", "due_date": "YYYY-MM-DD" או null, "due_time": "HH:MM" או null} אם נקבע או התבקש משהו חדש (ביקור, לחזור אליו, לשלוח חומר, לענות על שאלה). תאריך ושעה רק אם נאמרו במפורש. היום: ${todayIsrael()}.
+- {"kind": "none"} אם אין צעד חדש.
+החזר: {"relevant": true/false, "summary": "...", "next": {...}} (summary תמיד, גם כש-relevant=false)`;
   }
   return `${convo}
 
@@ -161,10 +171,15 @@ async function must(p) {
 }
 
 async function recordOnLead(sb, lead, chat, verdict, lastIso, phone) {
-  await must(sb.from('crm_lead_interactions').upsert([{
+  const row = {
     lead_id: lead.id, channel: 'whatsapp_amir', occurred_at: lastIso,
     summary: verdict.summary, body: verdict.summary, ref: `wa:${phone}:${lastIso}`, created_by: 'wa_scan',
-  }], { onConflict: 'channel,ref', ignoreDuplicates: true }));
+  };
+  const opts = { onConflict: 'channel,ref', ignoreDuplicates: true };
+  // The next step needs sql/018 (nir-buyers-agent); until it runs, the summary alone.
+  const { error } = await sb.from('crm_lead_interactions').upsert([verdict.next ? { ...row, next_step: verdict.next } : row], opts);
+  if (error && /next_step/.test(error.message)) await must(sb.from('crm_lead_interactions').upsert([row], opts));
+  else if (error) throw new Error(error.message);
   const patch = { analyzed_at: null };
   if (!lead.last_interaction_at || Date.parse(lead.last_interaction_at) < Date.parse(lastIso)) patch.last_interaction_at = lastIso;
   await must(sb.from('crm_leads').update(patch).eq('id', lead.id));
@@ -256,7 +271,7 @@ async function main() {
         if (r !== 'lead' && signal && signal.property && !verdict.property) verdict.property = signal.property;
         const lastIso = new Date(fresh[fresh.length - 1].t * 1000).toISOString();
         // Dry run shows only what WOULD reach the dashboard (the summary line), never messages.
-        if (DRY) { counts.written++; console.log(`  ${r} ${phone.slice(0, 3)}…${phone.slice(-2)} ${verdict.kind || ''} | ${verdict.summary}${verdict.source ? ' | מקור: ' + verdict.source : ''}${signal ? ' | סיבה: ' + signal.reason + (signal.match ? ` ("${signal.match}")` : '') : ''}`); continue; }
+        if (DRY) { counts.written++; console.log(`  ${r} ${phone.slice(0, 3)}…${phone.slice(-2)} ${verdict.kind || ''} | ${verdict.summary}${verdict.source ? ' | מקור: ' + verdict.source : ''}${signal ? ' | סיבה: ' + signal.reason + (signal.match ? ` ("${signal.match}")` : '') : ''}${r === 'lead' && verdict.next ? ' | צעד: ' + JSON.stringify(verdict.next) : ''}`); continue; }
         if (r === 'lead') await recordOnLead(sb, leadByPhone.get(phone), chat, verdict, lastIso, phone);
         else await recordCandidate(sb, phone, chat, verdict, lastIso);
         counts.written++;

@@ -2,7 +2,7 @@
 
 const { test } = require('node:test');
 const assert   = require('node:assert/strict');
-const { normalizePhone, hasRealEstateWords, streetKeys, strongSignal, nameUpdate, route, transcript, parseVerdict, firstLookFloor, pruneSeen } = require('../src/private-chat-rules');
+const { normalizePhone, hasRealEstateWords, streetKeys, strongSignal, nameUpdate, route, transcript, parseVerdict, parseNext, firstLookFloor, pruneSeen } = require('../src/private-chat-rules');
 
 const base = { phone: '0541234567', saved: true, newTexts: ['מה נשמע?'], leadPhones: new Set(), candidateStatus: undefined };
 
@@ -112,6 +112,18 @@ test('verdict: malformed output means "not real estate"; unknown kind -> other; 
   assert.equal(v.kind, 'other');
   assert.equal(v.source, null);
   assert.equal(v.property, 'נלקין');
+});
+
+test('next step (2026-10-30): not relevant / a dated step / nothing; bad dates and types are cleaned', () => {
+  assert.deepEqual(parseNext({ kind: 'not_relevant', title: 'x' }), { kind: 'not_relevant' });
+  assert.deepEqual(parseNext({ kind: 'step', type: 'schedule_visit', title: 'ביקור בנלקין', due_date: '2026-11-01', due_time: '17:00' }),
+    { kind: 'step', type: 'schedule_visit', title: 'ביקור בנלקין', due_date: '2026-11-01', due_time: '17:00' });
+  assert.deepEqual(parseNext({ kind: 'step', type: 'fly', due_date: 'ביום ראשון', due_time: '17:00' }),
+    { kind: 'step', type: 'other', title: null, due_date: null, due_time: null });
+  assert.equal(parseNext({ kind: 'none' }), null);
+  assert.equal(parseNext(null), null);
+  assert.deepEqual(parseVerdict('{"relevant":true,"summary":"ביטלה","next":{"kind":"not_relevant"}}').next, { kind: 'not_relevant' });
+  assert.equal(parseVerdict('{"relevant":true,"summary":"x"}').next, null);
 });
 
 test('ledger: first run looks 3 days back; later runs read from the fixed start, at most 3 days back', () => {

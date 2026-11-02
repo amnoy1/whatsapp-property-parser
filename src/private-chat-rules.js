@@ -138,12 +138,14 @@ function parseVerdict(text) {
   try {
     const j = JSON.parse(String(text || '').trim().replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, ''));
     const s = (v, n) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, n) : null);
+    // Amir 2026-11-02: the line carries the chat's own words, so he can check the summary at a glance.
+    const summary = s(j.summary, 200), quote = s(j.quote, 120);
     return {
       relevant: j.relevant === true,
       kind: KINDS.includes(j.kind) ? j.kind : 'other',
       source: s(j.source, 80),
       property: s(j.property, 80),
-      summary: s(j.summary, 200),
+      summary: summary && quote ? `${summary} · "${quote}"` : summary,
       next: parseNext(j.next),
     };
   } catch {

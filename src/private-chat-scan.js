@@ -44,7 +44,9 @@ const MAX_RUN_MS      = 10 * 60_000; // never hold the session longer than this
 const VOICE_RUN_MS    = 25 * 60_000; // after the session closes: local transcription can be slow
 const VOICE_FIRST_DAYS = 2;          // first run: voice notes from the last 2 days
 const ALERT_EVERY_MS  = 12 * 3_600_000;
-const MODEL = 'claude-haiku-4-5';
+// Amir 2026-11-02: every word matters; Sonnet 5.5 at medium effort, not Haiku (same switch as the calls).
+const MODEL = 'claude-sonnet-5-5';
+const EFFORT = 'medium';
 const DRY = process.argv.includes('--dry-run');
 // Voice notes are off until the media download works (WA Web 2026-10; spec sec 11): VOICE_NOTES=on in .env.
 const VOICE_ON = process.env.VOICE_NOTES === 'on';
@@ -122,6 +124,13 @@ function todayIsrael(now = new Date()) {
   return `${day} ${now.toLocaleDateString('en-CA', { timeZone: 'Asia/Jerusalem' })}`;
 }
 
+// Amir 2026-11-02 (שרי): a callback became a "meeting". Write only what was said.
+const ACCURACY_RULE = `דיוק (כל מילה חשובה לאמיר, הוא פועל לפי הסיכום):
+- כתוב רק מה שנכתב בהודעות. אל תסיק, אל תשדרג ואל תשלים פרטים.
+- "תתקשר אליי / נדבר / אחזור אליך ב-X" = שיחה חוזרת, לא פגישה ולא ביקור. "פגישה" או "ביקור" רק אם נכתב במפורש שנפגשים או באים לראות נכס.
+- שעה, תאריך או סכום שלא ברור למה הם מתייחסים - כתוב שלא ברור, אל תנחש.
+- quote: המשפט מההודעות שעליו נשען הסיכום (או הצעד הבא), מילה במילה, עד 15 מילים. null אם אין.`;
+
 function promptFor(mode, context, fresh) {
   const convo = (context ? `הודעות קודמות (להקשר בלבד):\n${context}\n\n` : '') + `ההודעות החדשות:\n${fresh}`;
   if (mode === 'lead') {
@@ -134,13 +143,15 @@ next = הצעד הבא של אמיר מול הליד, לפי ההודעות הח
 - {"kind": "not_relevant"} אם הליד הפסיק לחפש, לא מעוניין בכלל, לא רלוונטי לו כרגע או קנה במקום אחר. ירידה מנכס אחד כשהוא עדיין מחפש = step, לא not_relevant.
 - {"kind": "step", "type": "call"|"schedule_visit"|"send_alternative"|"answer_question"|"other", "title": "עד 6 מילים", "due_date": "YYYY-MM-DD" או null, "due_time": "HH:MM" או null} אם נקבע או התבקש משהו חדש (ביקור, לחזור אליו, לשלוח חומר, לענות על שאלה). תאריך ושעה רק אם נאמרו במפורש. היום: ${todayIsrael()}.
 - {"kind": "none"} אם אין צעד חדש.
-החזר: {"relevant": true/false, "summary": "...", "next": {...}} (summary תמיד, גם כש-relevant=false)`;
+החזר: {"relevant": true/false, "summary": "...", "quote": "...", "next": {...}} (summary תמיד, גם כש-relevant=false)
+${ACCURACY_RULE}`;
   }
   return `${convo}
 
 האם הצד השני בשיחה הוא ליד עסקי לאמיר בתחום הנדל"ן? כן = מתעניין לקנות/לשכור נכס, בעל נכס שרוצה למכור/להשכיר, או מתווך שמציע נכס/לקוח/שיתוף פעולה.
 לא = שיחה אישית, משפחה, חברים, ספק, רואת חשבון או עו"ד בעניין שאינו נכס, שירות לקוחות, פרסומת.
-החזר: {"relevant": true/false, "kind": "buyer"|"seller"|"broker"|"other", "source": "...", "property": "...", "summary": "..."}
+החזר: {"relevant": true/false, "kind": "buyer"|"seller"|"broker"|"other", "source": "...", "property": "...", "summary": "...", "quote": "..."}
+${ACCURACY_RULE}
 - source: רק אם נאמר במפורש איך הגיע (למשל "ראיתי ביד2", "ראיתי את השלט", "X הפנה אותי"). אחרת null. אל תנחש.
 - property: הרחוב או הנכס שהוזכר, אחרת null.
 - summary: שורה אחת, עד 20 מילים: מי זה ומה הוא רוצה. תמיד, גם כש-relevant=false.`;
@@ -151,11 +162,13 @@ async function askModel(mode, chat) {
   const fresh = chat.msgs.filter((m) => m.t > chat.cursor);
   const r = await anthropic.messages.create({
     model: MODEL,
-    max_tokens: 300,
+    // Room for the model's thinking before the short JSON; the answer is the text block, not content[0].
+    max_tokens: 4000,
+    output_config: { effort: EFFORT },
     system: SYSTEM,
     messages: [{ role: 'user', content: promptFor(mode, transcript(older, chat.name, { maxMsgs: 10, maxChars: 1500 }), transcript(fresh, chat.name)) }],
   });
-  return parseVerdict(r.content?.[0]?.text);
+  return parseVerdict((r.content || []).find((b) => b.type === 'text')?.text);
 }
 
 // ── Supabase writes (summaries only, never the messages) ──────────────────────

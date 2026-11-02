@@ -131,6 +131,14 @@ const ACCURACY_RULE = `דיוק (כל מילה חשובה לאמיר, הוא פ�
 - שעה, תאריך או סכום שלא ברור למה הם מתייחסים - כתוב שלא ברור, אל תנחש.
 - quote: המשפט מההודעות שעליו נשען הסיכום (או הצעד הבא), מילה במילה, עד 15 מילים. null אם אין.`;
 
+const nextRule = () => `next = הצעד הבא של אמיר מול הליד, לפי ההודעות החדשות בלבד:
+- {"kind": "not_relevant"} אם הליד הפסיק לחפש, לא מעוניין בכלל, לא רלוונטי לו כרגע או קנה במקום אחר. ירידה מנכס אחד כשהוא עדיין מחפש = step, לא not_relevant.
+- {"kind": "step", "type": "call"|"schedule_visit"|"send_alternative"|"answer_question"|"other", "title": "עד 6 מילים", "due_date": "YYYY-MM-DD" או null, "due_time": "HH:MM" או null} אם נקבע או התבקש משהו חדש (ביקור, לחזור אליו, לשלוח חומר, לענות על שאלה). תאריך ושעה רק אם נאמרו במפורש. היום: ${todayIsrael()}.
+- לא ברור מההודעות מה נקבע = {"kind": "none"}, לא צעד (הסיכום כבר אומר שלא ברור).
+- {"kind": "none"} אם אין צעד חדש.`;
+
+// Amir 2026-11-02: a new contact gets the same step logic as a call; once he
+// approves, its summary is what the analyzer reads.
 function promptFor(mode, context, fresh) {
   const convo = (context ? `הודעות קודמות (להקשר בלבד):\n${context}\n\n` : '') + `ההודעות החדשות:\n${fresh}`;
   if (mode === 'lead') {
@@ -139,10 +147,7 @@ function promptFor(mode, context, fresh) {
 זה ליד קיים של אמיר. כתוב שורת סיכום אחת, עד 25 מילים, של מה שחדש בהודעות החדשות: מה הליד אמר או ביקש, מה סוכם, מה הצעד הבא.
 אם הליד אמר שהוא לא מעוניין, לא רלוונטי לו כרגע, קנה במקום אחר, ירד מהנכס או ביטל/דחה ביקור - פתח בזה, קרוב למילים שלו, וכתוב גם את הסיבה אם נאמרה (למשל: "כרגע לא רלוונטי לה לקנות דירה, ביטלה את הביקור"). אסור להשמיט את זה.
 אם בהודעות החדשות אין שום דבר מהותי (רק תודה, אישור, אימוג'י, ברכה) - relevant=false.
-next = הצעד הבא של אמיר מול הליד, לפי ההודעות החדשות בלבד:
-- {"kind": "not_relevant"} אם הליד הפסיק לחפש, לא מעוניין בכלל, לא רלוונטי לו כרגע או קנה במקום אחר. ירידה מנכס אחד כשהוא עדיין מחפש = step, לא not_relevant.
-- {"kind": "step", "type": "call"|"schedule_visit"|"send_alternative"|"answer_question"|"other", "title": "עד 6 מילים", "due_date": "YYYY-MM-DD" או null, "due_time": "HH:MM" או null} אם נקבע או התבקש משהו חדש (ביקור, לחזור אליו, לשלוח חומר, לענות על שאלה). תאריך ושעה רק אם נאמרו במפורש. היום: ${todayIsrael()}.
-- {"kind": "none"} אם אין צעד חדש.
+${nextRule()}
 החזר: {"relevant": true/false, "summary": "...", "quote": "...", "next": {...}} (summary תמיד, גם כש-relevant=false)
 ${ACCURACY_RULE}`;
   }
@@ -150,11 +155,12 @@ ${ACCURACY_RULE}`;
 
 האם הצד השני בשיחה הוא ליד עסקי לאמיר בתחום הנדל"ן? כן = מתעניין לקנות/לשכור נכס, בעל נכס שרוצה למכור/להשכיר, או מתווך שמציע נכס/לקוח/שיתוף פעולה.
 לא = שיחה אישית, משפחה, חברים, ספק, רואת חשבון או עו"ד בעניין שאינו נכס, שירות לקוחות, פרסומת.
-החזר: {"relevant": true/false, "kind": "buyer"|"seller"|"broker"|"other", "source": "...", "property": "...", "summary": "...", "quote": "..."}
+החזר: {"relevant": true/false, "kind": "buyer"|"seller"|"broker"|"other", "source": "...", "property": "...", "summary": "...", "quote": "...", "next": {...}}
 ${ACCURACY_RULE}
 - source: רק אם נאמר במפורש איך הגיע (למשל "ראיתי ביד2", "ראיתי את השלט", "X הפנה אותי"). אחרת null. אל תנחש.
 - property: הרחוב או הנכס שהוזכר, אחרת null.
-- summary: שורה אחת, עד 20 מילים: מי זה ומה הוא רוצה. תמיד, גם כש-relevant=false.`;
+- summary: שורה אחת, עד 30 מילים: מי זה, מה הוא רוצה ומה נכתב בהודעות (תקציב, מועדים, מה סוכם). תמיד, גם כש-relevant=false.
+${nextRule()}`;
 }
 
 async function askModel(mode, chat) {
@@ -204,7 +210,12 @@ async function recordCandidate(sb, phone, chat, verdict, lastIso) {
   if (chat.name) row.name = chat.name;
   if (verdict.source) row.source = verdict.source;
   if (verdict.property) row.property = verdict.property;
-  await must(sb.from('crm_lead_candidates').upsert([row], { onConflict: 'phone' }));
+  // The step waits on the candidate and moves to the lead when Amir approves (nir-buyers-agent sql/019).
+  // A later scan with no step of its own keeps the earlier one; until sql/019 runs, the row without it.
+  if (!verdict.next) return must(sb.from('crm_lead_candidates').upsert([row], { onConflict: 'phone' }));
+  const { error } = await sb.from('crm_lead_candidates').upsert([{ ...row, next_step: verdict.next }], { onConflict: 'phone' });
+  if (error && /next_step/.test(error.message)) await must(sb.from('crm_lead_candidates').upsert([row], { onConflict: 'phone' }));
+  else if (error) throw new Error(error.message);
 }
 
 // ── main ──────────────────────────────────────────────────────────────────────
@@ -284,7 +295,7 @@ async function main() {
         if (r !== 'lead' && signal && signal.property && !verdict.property) verdict.property = signal.property;
         const lastIso = new Date(fresh[fresh.length - 1].t * 1000).toISOString();
         // Dry run shows only what WOULD reach the dashboard (the summary line), never messages.
-        if (DRY) { counts.written++; console.log(`  ${r} ${phone.slice(0, 3)}…${phone.slice(-2)} ${verdict.kind || ''} | ${verdict.summary}${verdict.source ? ' | מקור: ' + verdict.source : ''}${signal ? ' | סיבה: ' + signal.reason + (signal.match ? ` ("${signal.match}")` : '') : ''}${r === 'lead' && verdict.next ? ' | צעד: ' + JSON.stringify(verdict.next) : ''}`); continue; }
+        if (DRY) { counts.written++; console.log(`  ${r} ${phone.slice(0, 3)}…${phone.slice(-2)} ${verdict.kind || ''} | ${verdict.summary}${verdict.source ? ' | מקור: ' + verdict.source : ''}${signal ? ' | סיבה: ' + signal.reason + (signal.match ? ` ("${signal.match}")` : '') : ''}${verdict.next ? ' | צעד: ' + JSON.stringify(verdict.next) : ''}`); continue; }
         if (r === 'lead') await recordOnLead(sb, leadByPhone.get(phone), chat, verdict, lastIso, phone);
         else await recordCandidate(sb, phone, chat, verdict, lastIso);
         counts.written++;

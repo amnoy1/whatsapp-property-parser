@@ -18,7 +18,7 @@ require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
 const { createClient } = require('@supabase/supabase-js');
-const { connect } = require('../src/whatsapp-client');
+const { connect, fetchGroupMessages } = require('../src/whatsapp-client');
 
 const WRITE = process.argv.includes('--write');
 const DAYS = 60;
@@ -60,6 +60,7 @@ async function main() {
   }
   console.log(`${Object.keys(listings).length} brokers in whatsapp_properties.`);
 
+  console.log('מתחבר לוואטסאפ...');
   const client = await connect();
   const found = {}; // norm name -> { phone, source }
   const put = (name, phone, source) => {
@@ -68,54 +69,59 @@ async function main() {
     found[k] = { phone, source };
   };
 
-  // 1. Amir's saved contacts.
-  for (const c of await client.getContacts()) {
-    if (!c.isMyContact || c.isGroup) continue;
-    const phone = toLocal(c.number);
-    if (phone) put(c.name, phone, 'contacts');
-  }
+  // client.getChats()/getContacts() hang on the current WA Web (see
+  // fetchGroupMessages), so contacts and group members are read straight from
+  // the WA store, in one call. A "lid" contact may carry its phone number.
+  console.log('קורא אנשי קשר וחברי קבוצות...');
+  const store = await client.pupPage.evaluate((groupNames) => {
+    const C = window.require('WAWebCollections');
+    const contacts = C.Contact.getModelsArray().map((c) => ({
+      id: c.id && c.id._serialized,
+      name: c.name || null,
+      pushname: c.pushname || null,
+      saved: !!(c.isAddressBookContact || c.isMyContact),
+      pn: c.phoneNumber ? (c.phoneNumber._serialized || c.phoneNumber.user || String(c.phoneNumber)) : null,
+    }));
+    const members = {};
+    for (const ch of C.Chat.getModelsArray()) {
+      if (!groupNames.includes(ch.name)) continue;
+      const ps = ch.groupMetadata && ch.groupMetadata.participants;
+      members[ch.name] = ps ? ps.getModelsArray().map((p) => p.id._serialized) : [];
+    }
+    return { contacts, members };
+  }, GROUPS);
+  const byId = new Map(store.contacts.map((c) => [c.id, c]));
+  const phoneOf = (id) => {
+    if (!id) return null;
+    if (id.endsWith('@c.us')) return toLocal(id.split('@')[0]);
+    const pn = byId.get(id)?.pn;
+    return pn ? toLocal(String(pn).split('@')[0]) : null;
+  };
+  console.log(`   ${store.contacts.length} אנשי קשר בזיכרון של וואטסאפ`);
 
-  // 2 + 3. The groups: who posted, then who is a member.
+  // 1. Amir's saved contacts.
+  for (const c of store.contacts) if (c.saved && c.name) put(c.name, phoneOf(c.id), 'contacts');
+
+  // 2. Who posted in the groups (the daily scan's own loader), 3. who is a member.
   let hidden = 0;
-  const chats = await client.getChats();
   for (const groupName of GROUPS) {
-    const chat = chats.find((ch) => ch.isGroup && ch.name === groupName);
-    if (!chat) { console.log(`⚠️  group not found: ${groupName}`); continue; }
-    const since = Date.now() / 1000 - DAYS * 86400;
-    const msgs = (await chat.fetchMessages({ limit: 2000 })).filter((m) => m.timestamp >= since && !m.fromMe);
-    const lids = [];
-    const authors = [];
+    console.log(`קורא את ${groupName}...`);
+    let msgs = [];
+    try {
+      msgs = (await fetchGroupMessages(client, groupName, Date.now() - DAYS * 86_400_000)).messages;
+    } catch (e) {
+      console.log(`   ⚠️  ${e.message.slice(0, 100)}`);
+    }
     for (const m of msgs) {
-      const name = m._data?.notifyName;
-      if (!name || !m.author) continue;
-      authors.push({ name, id: m.author });
-      if (m.author.endsWith('@lid')) lids.push(m.author);
-    }
-    for (const p of chat.participants || []) if (p.id.server === 'lid') lids.push(p.id._serialized);
-    // WhatsApp hides numbers behind "lid" ids in some groups; ask it for the phone behind each.
-    const pnByLid = {};
-    if (lids.length) {
-      try {
-        for (const r of await client.getContactLidAndPhone([...new Set(lids)])) if (r.pn) pnByLid[r.lid] = r.pn;
-      } catch (e) {
-        console.log(`   (lid lookup failed: ${e.message.slice(0, 80)})`);
-      }
-    }
-    const phoneOf = (id) => toLocal(String(id.endsWith('@lid') ? pnByLid[id] || '' : id).split('@')[0]);
-    for (const a of authors) {
-      const ph = phoneOf(a.id);
-      if (ph) put(a.name, ph, 'group_author');
+      const ph = m.senderPhone ? toLocal(m.senderPhone) : phoneOf(m.senderId);
+      if (ph) put(m.sender, ph, 'group_author');
       else hidden++;
     }
-    for (const p of chat.participants || []) {
-      const ph = phoneOf(p.id._serialized);
-      if (!ph) continue;
-      try {
-        const c = await client.getContactById(p.id._serialized);
-        put(c.pushname || c.name, ph, 'group_member');
-      } catch {}
+    for (const id of store.members[groupName] || []) {
+      const c = byId.get(id);
+      if (c) put(c.pushname || c.name, phoneOf(id), 'group_member');
     }
-    console.log(`${groupName}: ${msgs.length} messages, ${(chat.participants || []).length} members`);
+    console.log(`   ${msgs.length} הודעות, ${(store.members[groupName] || []).length} חברים`);
   }
   await client.destroy().catch(() => {});
 

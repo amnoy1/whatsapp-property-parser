@@ -44,9 +44,13 @@ function toLocal(user) {
 
 async function main() {
   if (fs.existsSync(LOCK_FILE)) {
-    console.log('⚠️  The daily report is running (lock file). Try again in a few minutes.');
+    console.log('⚠️  WhatsApp is busy (daily report / private scan). Try again in a few minutes.');
     process.exit(1);
   }
+  // Hold the same lock as the daily report, so the hourly private scan skips
+  // while this runs: two clients on one session log it out (2026-11-04).
+  fs.mkdirSync(path.dirname(LOCK_FILE), { recursive: true });
+  fs.writeFileSync(LOCK_FILE, new Date().toISOString());
   const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
   const { data: props, error } = await supabase.from('whatsapp_properties').select('broker_name,broker_phone');
   if (error) throw new Error(error.message);
@@ -157,7 +161,9 @@ async function main() {
   console.log(`✅ ${ok.length} מתווכים נשמרו בטבלה, ${filled} נכסים קיבלו טלפון.`);
 }
 
-main().then(() => process.exit(0)).catch((e) => {
+const unlock = () => { try { fs.unlinkSync(LOCK_FILE); } catch {} };
+main().then(() => { unlock(); process.exit(0); }).catch((e) => {
+  unlock();
   console.error('❌', e.message);
   process.exit(1);
 });

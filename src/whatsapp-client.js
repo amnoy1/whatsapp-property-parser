@@ -154,6 +154,9 @@ async function fetchGroupMessages(client, groupName, sinceMs) {
         .filter(m => !m.isNotification && !m.id.fromMe && m.body && m.t * 1000 >= cutoff)
         .map(m => ({
           sender: m.notifyName || m.senderObj?.name || 'Unknown',
+          // Amir 2026-11-04: the poster's number fills a listing's missing broker
+          // phone. Groups that hide numbers ("lid") give none.
+          senderPhone: m.author && m.author.server === 'c.us' ? m.author.user : null,
           date:   new Date(m.t * 1000).toISOString().split('T')[0],
           time:   new Date(m.t * 1000).toTimeString().slice(0, 5),
           text:   m.body,

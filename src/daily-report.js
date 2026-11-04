@@ -6,6 +6,7 @@ const fs = require('fs');
 const path = require('path');
 const { connect, fetchGroupMessages, disconnect } = require('./whatsapp-client');
 const { extractProperties }       = require('./property-extractor');
+const { fillBrokerPhones }        = require('./broker-phones');
 const { generateExcel }           = require('./excel-generator');
 const { generateHtml }            = require('./html-generator');
 const { fetchAllProperties, upsertProperties, deleteProperties, uploadToStorage } = require('./supabase-uploader');
@@ -194,9 +195,15 @@ async function main() {
 
   // 4. Extract properties with Claude — each live message = its own block
   console.log('\n[4/5] Extracting properties...');
-  const blocks    = allMessages.map(m => ({ sender: m.sender, date: m.date, text: m.text }));
+  const blocks    = allMessages.map(m => ({ sender: m.sender, senderPhone: m.senderPhone || null, date: m.date, text: m.text }));
   const extracted = await extractProperties(blocks);
   console.log(`   ${extracted.length} listings extracted from ${blocks.length} messages`);
+  try {
+    const filled = await fillBrokerPhones(extracted);
+    if (filled) console.log(`   📞 Broker phones filled: ${filled}`);
+  } catch (e) {
+    console.log(`   ⚠️  Broker phones not filled: ${e.message.slice(0, 120)}`);
+  }
 
   // 4b. Enrich missing neighborhoods: curated street_neighborhoods table
   // first, then Google Geocoding as fallback. A geocoded result self-heals

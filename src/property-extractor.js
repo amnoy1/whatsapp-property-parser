@@ -81,7 +81,10 @@ ${block.text}
       storage:       Boolean(data.storage),
       elevator:      Boolean(data.elevator),
       broker_name:   data.broker_name    || block.sender,
-      broker_phone:  cleanPhone(data.broker_phone),
+      // Amir 2026-11-04: no phone in the text -> the poster's own number, when
+      // the poster is the broker named (not a listing quoted for someone else).
+      broker_phone:  cleanPhone(data.broker_phone) ||
+                     (data.broker_name && data.broker_name !== block.sender ? null : cleanPhone(block.senderPhone)),
       publish_date:  block.date,
     }));
   } catch (err) {

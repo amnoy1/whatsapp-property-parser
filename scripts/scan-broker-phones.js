@@ -4,7 +4,7 @@
 // 2026-11-04: "טבלת מתווכים והטלפונים שלהם ... סקירה בקבוצות פעם אחת").
 // Read-only on WhatsApp, no model calls. Three sources, best first:
 //   contacts      - a contact Amir saved under the broker's name
-//   group_author  - who posted in the groups (last 60 days) under that name
+//   group_author  - who posted in the groups (last 30 days) under that name
 //   group_member  - a group member whose WhatsApp name is the broker's name
 //
 // Run from the live folder, while the daily report is not running:
@@ -21,7 +21,7 @@ const { createClient } = require('@supabase/supabase-js');
 const { connect, fetchGroupMessages } = require('../src/whatsapp-client');
 
 const WRITE = process.argv.includes('--write');
-const DAYS = 60;
+const DAYS = 30; // Amir 2026-11-04: 30 days are enough
 const LOCK_FILE = path.join(__dirname, '..', 'data', 'running.lock');
 const OUT = path.join(__dirname, '..', 'data', 'broker-phones.json');
 

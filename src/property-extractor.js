@@ -1,6 +1,7 @@
 'use strict';
 
 const Anthropic = require('@anthropic-ai/sdk');
+const { normalizeCity } = require('./city-normalizer');
 
 const client = new Anthropic();
 const MODEL  = 'claude-haiku-4-5';
@@ -46,7 +47,9 @@ ${block.text}
 - parking: ספור חניות מפורשות. 0 אם לא הוזכרו.
 - storage: true רק אם מוזכר מפורשות מחסן
 - elevator: true רק אם מוזכר מפורשות מעלית
-- city: ברירת מחדל היא "כפר סבא" — רק אם מוזכרת עיר אחרת (רעננה, הוד השרון, אלפי מנשה וכד') — החזר אותה במקום
+- city: ברירת מחדל היא "כפר סבא" — רק אם מוזכרת עיר או יישוב אחר (רעננה, הוד השרון, אלפי מנשה, צופים, צור יגאל וכד') — החזר אותו במקום, ואל תשאיר את שם היישוב בתוך address
+- שים לב: בכפר סבא יש רחובות על שם ערים (למשל "יבנה 13", "אחי אילת 14") — זה רחוב, לא עיר
+- "הירוקה" היא שכונה בכפר סבא, לא עיר
 - neighborhood: החזר null אם לא מוזכרת שכונה
 - החזר null עבור שדות אחרים שלא נמצאו`;
 
@@ -66,7 +69,8 @@ ${block.text}
 
     if (!Array.isArray(arr) || arr.length === 0) return [];
 
-    return arr.map(data => ({
+    // normalizeCity: deterministic city fixes (city-normalizer.js), no model cost
+    return arr.map(data => normalizeCity({
       property_type: data.property_type  || null,
       address:       data.address        || null,
       city:          data.city           || 'כפר סבא',
